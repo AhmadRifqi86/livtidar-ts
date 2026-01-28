@@ -1,15 +1,24 @@
 """
-Unified LIV Framework with Explicit Weight Matrix Generation
+Unified LIV Framework with Consistent Feature Interface
 
 Core equation: Y = T(x) · x
-where T(x) is ALWAYS an explicit matrix, and mixing is ALWAYS matmul.
+Token mixing: T_ij = C_i · M_ij · B_j  (unified for ALL types)
 
-The weight generators produce the T matrix based on:
-- Token mixing type: diagonal, low_rank, semi_separable, toeplitz
-- Channel mixing type: diagonal, dense, grouped
+All token mixing types use exactly 3 feature groups:
+- B: input projection  [batch, seq_len, dim]
+- C: output projection [batch, seq_len, dim]
+- S: structure param   [batch, seq_len, dim] or [dim, kernel_size]
 
-This allows architecture search to swap weight generators while keeping
-the core computation (matmul) fixed.
+The M_ij matrix is determined by type:
+- Diagonal:      M_ij = δ_ij           (S unused, or extra scaling)
+- Low-rank:      M_ij = 1              (S unused, outer product C·B^T)
+- Toeplitz:      M_ij = S_{i-j}        (S = convolution kernel)
+- Semi-separable: M_ij = ∏A from S    (S = transition coefficients A)
+
+NOTE: 
+-   Maybe pairing featurizer and token mixer in the same class for clear coupling, because in original paper
+    the number of featurizer output is based on token mixing type --> 3 for low rank, 4 for recur, 2 for diagonal
+-   also non-linearity and sparsity genome is not yet implemented
 """
 
 import torch
@@ -17,36 +26,128 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from enum import Enum
-from typing import Dict, Optional, Tuple
 
 
 class TokenMixType(Enum):
-    DIAGONAL = 1       # T_ij = c_i * δ_ij
-    LOW_RANK = 2       # T_ij = C_i · B_j  (outer product)
-    TOEPLITZ = 3       # T_ij = K_{i-j}    (convolution)
-    SEMI_SEPARABLE = 4 # T_ij = C_i · ∏A · B_j (recurrence)
+    DIAGONAL = 1       # T_ij = C_i · δ_ij · B_j = C_i · B_i · δ_ij
+    LOW_RANK = 2       # T_ij = C_i · 1 · B_j = C_i · B_j
+    TOEPLITZ = 3       # T_ij = C_i · K_{i-j} · B_j
+    SEMI_SEPARABLE = 4 # T_ij = C_i · (∏A) · B_j
 
 
 class ChannelMixType(Enum):
-    DIAGONAL = 1  # T^{αβ} = w_α * δ_{αβ}
-    DENSE = 2     # T^{αβ} = W_{αβ}
-    GROUPED = 3   # T^{αβ} = block_diag(W_1, ..., W_h)
+    DIAGONAL = 1  # W_{αβ} = w_α · δ_{αβ}
+    DENSE = 2     # W_{αβ} = W[α,β]
+    GROUPED = 3   # W = block_diag(W_1, ..., W_h)
 
 
 # =============================================================================
-# Token Mixing Weight Generators
+# Unified Featurizer: Always produces (B, C, S)
+# =============================================================================
+
+class UnifiedFeaturizer(nn.Module):
+    """Produces exactly 3 feature groups for token mixing: B, C, S.
+
+    B: input projection  - how each input position contributes
+    C: output projection - how each output position is formed
+    S: structure param   - type-specific (A for recurrence, K for conv, etc.)
+
+    This ensures all token mixing types have the same interface.
+    """
+
+    def __init__(self, dim: int, num_heads: int = 1,
+                 token_mix_type: TokenMixType = TokenMixType.LOW_RANK,
+                 kernel_size: int = 3):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.token_mix_type = token_mix_type
+        self.kernel_size = kernel_size
+
+        # B and C projections (used by ALL types)
+        self.W_B = nn.Linear(dim, dim)  # Input gate/projection
+        self.W_C = nn.Linear(dim, dim)  # Output gate/projection
+
+        # S projection (structure-specific)
+        if token_mix_type == TokenMixType.DIAGONAL:
+            # S acts as additional scaling (or can be ignored)
+            self.W_S = nn.Linear(dim, dim)
+
+        elif token_mix_type == TokenMixType.LOW_RANK:
+            # S not needed for outer product, but we keep it for uniformity
+            # Can be used as learned bias or scaling
+            self.W_S = nn.Linear(dim, dim)
+
+        elif token_mix_type == TokenMixType.TOEPLITZ:
+            # S generates the convolution kernel
+            # Input-dependent kernel: x -> [dim, kernel_size]
+            self.W_S = nn.Linear(dim, dim * kernel_size)
+
+        elif token_mix_type == TokenMixType.SEMI_SEPARABLE:
+            # S generates state transition A
+            self.W_S = nn.Linear(dim, dim)
+            # Learnable decay bias for stability
+            self.A_log = nn.Parameter(torch.zeros(dim))
+
+        # Value projection (what gets mixed)
+        self.W_V = nn.Linear(dim, dim)
+
+    def forward(self, x: torch.Tensor):
+        """Compute B, C, S, V from input.
+
+        Args:
+            x: [batch, seq_len, dim]
+
+        Returns:
+            dict with B, C, S, V tensors
+        """
+        batch, seq_len, dim = x.shape
+
+        # B and C: always [batch, seq_len, dim]
+        B = self.W_B(x)
+        C = self.W_C(x)
+        V = self.W_V(x)
+
+        # S: structure-specific
+        if self.token_mix_type == TokenMixType.DIAGONAL:
+            S = torch.sigmoid(self.W_S(x))  # [batch, L, dim] scaling
+
+        elif self.token_mix_type == TokenMixType.LOW_RANK:
+            S = self.W_S(x)  # [batch, L, dim] (optional, can be identity-like)
+
+        elif self.token_mix_type == TokenMixType.TOEPLITZ:
+            # Generate per-position kernel, then average for shared kernel
+            S_raw = self.W_S(x)  # [batch, L, dim * kernel_size]
+            S = S_raw.mean(dim=1)  # [batch, dim * kernel_size]
+            S = S.view(batch, self.dim, self.kernel_size)  # [batch, dim, K]
+
+        elif self.token_mix_type == TokenMixType.SEMI_SEPARABLE:
+            # A = sigmoid(proj) for stability in (0, 1)
+            S = torch.sigmoid(self.W_S(x) + self.A_log)  # [batch, L, dim]
+
+        return {'B': B, 'C': C, 'S': S, 'V': V}
+
+
+# =============================================================================
+# Token Mixing Weight Generator (Unified Interface)
 # =============================================================================
 
 class TokenMixWeightGenerator(nn.Module):
-    """Generates the L×L token mixing matrix T based on type.
+    """Generates L×L token mixing matrix T from features (B, C, S).
 
-    The output is ALWAYS an explicit [batch, L, L] matrix (or [batch, heads, L, L]).
-    The actual mixing is always: output = T @ values
+    Core formula: T_ij = C_i · M_ij · B_j
+
+    The M_ij structure depends on type:
+    - DIAGONAL:      M_ij = δ_ij
+    - LOW_RANK:      M_ij = 1
+    - TOEPLITZ:      M_ij = K_{i-j}
+    - SEMI_SEPARABLE: M_ij = ∏_{k=j+1}^{i-1} A_k
     """
 
     def __init__(self, dim: int, mix_type: TokenMixType,
                  num_heads: int = 1, kernel_size: int = 3,
-                 causal: bool = True):
+                 causal: bool = True, use_softmax: bool = False):
         super().__init__()
         self.dim = dim
         self.mix_type = mix_type
@@ -54,155 +155,141 @@ class TokenMixWeightGenerator(nn.Module):
         self.head_dim = dim // num_heads
         self.kernel_size = kernel_size
         self.causal = causal
+        self.use_softmax = use_softmax
 
-        if mix_type == TokenMixType.DIAGONAL:
-            # Learnable per-position scaling (or input-dependent)
-            self.scale_proj = nn.Linear(dim, dim)
-
-        elif mix_type == TokenMixType.LOW_RANK:
-            # Q, K projections for outer product T = softmax(QK^T)
-            self.W_Q = nn.Linear(dim, dim)
-            self.W_K = nn.Linear(dim, dim)
-
-        elif mix_type == TokenMixType.TOEPLITZ:
-            # Per-channel convolution kernels
-            self.kernel = nn.Parameter(torch.randn(num_heads, self.head_dim, kernel_size) * 0.02)
-
-        elif mix_type == TokenMixType.SEMI_SEPARABLE:
-            # A, B, C projections for recurrence
-            self.W_A = nn.Linear(dim, dim)
-            self.W_B = nn.Linear(dim, dim)
-            self.W_C = nn.Linear(dim, dim)
-            # Log-parameterized decay for stability
-            self.A_log = nn.Parameter(torch.log(torch.rand(dim) * 0.5 + 0.5))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Generate the token mixing matrix T.
+    def forward(self, B: torch.Tensor, C: torch.Tensor,
+                S: torch.Tensor) -> torch.Tensor:
+        """Generate token mixing matrix T from features.
 
         Args:
-            x: [batch, seq_len, dim]
+            B: [batch, seq_len, dim] - input projection
+            C: [batch, seq_len, dim] - output projection
+            S: structure param (shape varies by type)
+
         Returns:
-            T: [batch, (heads), seq_len, seq_len] - the explicit mixing matrix
+            T: [batch, num_heads, seq_len, seq_len]
         """
-        B, L, D = x.shape
+        batch, seq_len, dim = B.shape
+        H = self.num_heads
+        d = self.head_dim
+
+        # Reshape to heads: [batch, heads, seq_len, head_dim]
+        B_h = B.view(batch, seq_len, H, d).permute(0, 2, 1, 3)
+        C_h = C.view(batch, seq_len, H, d).permute(0, 2, 1, 3)
 
         if self.mix_type == TokenMixType.DIAGONAL:
-            return self._diagonal_weight(x)
+            T = self._diagonal(B_h, C_h, S)
         elif self.mix_type == TokenMixType.LOW_RANK:
-            return self._low_rank_weight(x)
+            T = self._low_rank(B_h, C_h, S)
         elif self.mix_type == TokenMixType.TOEPLITZ:
-            return self._toeplitz_weight(x)
+            T = self._toeplitz(B_h, C_h, S)
         elif self.mix_type == TokenMixType.SEMI_SEPARABLE:
-            return self._semi_separable_weight(x)
+            T = self._semi_separable(B_h, C_h, S)
 
-    def _diagonal_weight(self, x: torch.Tensor) -> torch.Tensor:
-        """T_ij = c_i * δ_ij → diagonal L×L matrix"""
-        B, L, D = x.shape
-        # Input-dependent diagonal scaling
-        c = torch.sigmoid(self.scale_proj(x))  # [B, L, D]
-        # Construct diagonal matrix: T[i,i] = c[i], T[i,j≠i] = 0
-        # For per-head: [B, H, L, L] diagonal
-        c = c.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B, H, L, d]
-        # We return per-head diagonal matrices, averaged over head_dim
-        c_avg = c.mean(dim=-1)  # [B, H, L]
-        T = torch.diag_embed(c_avg)  # [B, H, L, L]
+        # Apply causal mask if needed
+        if self.causal and self.mix_type != TokenMixType.DIAGONAL:
+            mask = torch.triu(torch.ones(seq_len, seq_len, device=T.device), diagonal=1).bool()
+            T = T.masked_fill(mask, 0.0 if not self.use_softmax else float('-inf'))
+
+        # Optional softmax (for attention)
+        if self.use_softmax:
+            T = F.softmax(T, dim=-1)
+
         return T
 
-    def _low_rank_weight(self, x: torch.Tensor) -> torch.Tensor:
-        """T_ij = softmax(Q_i · K_j / √d) → dense L×L from outer product"""
-        B, L, D = x.shape
-        Q = self.W_Q(x).view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        K = self.W_K(x).view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        # [B, H, L, L]
+    def _diagonal(self, B_h, C_h, S):
+        """T_ij = (C_i ⊙ B_i) · δ_ij - diagonal matrix"""
+        # S: [batch, L, dim] additional scaling
+        batch, H, L, d = B_h.shape
+
+        # Diagonal: T[i,i] = C_i · B_i (element-wise, summed over head_dim)
+        # [batch, H, L]
+        diag_vals = (C_h * B_h).sum(dim=-1)
+
+        # Build diagonal matrix
+        T = torch.diag_embed(diag_vals)  # [batch, H, L, L]
+        return T
+
+    def _low_rank(self, B_h, C_h, S):
+        """T_ij = C_i · B_j^T - outer product (attention-like)"""
+        # [batch, H, L, L] = [batch, H, L, d] @ [batch, H, d, L]
         scale = math.sqrt(self.head_dim)
-        T = torch.matmul(Q, K.transpose(-2, -1)) / scale
-
-        if self.causal:
-            mask = torch.triu(torch.ones(L, L, device=T.device, dtype=torch.bool), diagonal=1)
-            T = T.masked_fill(mask, float('-inf'))
-
-        T = F.softmax(T, dim=-1)
+        T = torch.matmul(C_h, B_h.transpose(-2, -1)) / scale
         return T
 
-    def _toeplitz_weight(self, x: torch.Tensor) -> torch.Tensor:
-        """T_ij = K_{i-j} for |i-j| < kernel_size → banded Toeplitz L×L"""
-        B, L, D = x.shape
-        H = self.num_heads
+    def _toeplitz(self, B_h, C_h, S):
+        """T_ij = C_i · K_{i-j} · B_j - convolution structure"""
+        # S: [batch, dim, kernel_size] - convolution kernel
+        batch, H, L, d = B_h.shape
+        K = S  # [batch, dim, kernel_size]
 
-        # Construct Toeplitz matrix from kernel
-        # kernel: [H, head_dim, kernel_size]
-        # We average over head_dim to get [H, kernel_size]
-        k = self.kernel.mean(dim=1)  # [H, kernel_size]
+        # Build Toeplitz matrix from kernel
+        # Average kernel over dim to get [batch, kernel_size]
+        K_avg = K.mean(dim=1)  # [batch, kernel_size]
 
-        # Build L×L Toeplitz matrix per head
-        T = torch.zeros(H, L, L, device=x.device, dtype=x.dtype)
-        for i in range(self.kernel_size):
-            if self.causal:
-                # Only fill lower diagonals (causal)
-                diag_idx = i
-                diag_len = L - i
-                T[:, torch.arange(i, L), torch.arange(0, diag_len)] = k[:, i:i+1].expand(-1, diag_len)
-            else:
-                # Fill both diagonals (non-causal)
-                if i == 0:
-                    T[:, torch.arange(L), torch.arange(L)] = k[:, 0:1].expand(-1, L)
-                else:
-                    T[:, torch.arange(i, L), torch.arange(0, L-i)] = k[:, i:i+1].expand(-1, L-i)
-                    T[:, torch.arange(0, L-i), torch.arange(i, L)] = k[:, i:i+1].expand(-1, L-i)
+        T = torch.zeros(batch, H, L, L, device=B_h.device, dtype=B_h.dtype)
 
-        return T.unsqueeze(0).expand(B, -1, -1, -1)  # [B, H, L, L]
+        for k in range(min(self.kernel_size, L)):
+            # Diagonal k: positions (i, i-k) for i >= k
+            if L - k > 0:
+                # Scale by C_i and B_{i-k}
+                # C_h[:, :, k:, :] and B_h[:, :, :L-k, :]
+                C_part = C_h[:, :, k:, :]       # [batch, H, L-k, d]
+                B_part = B_h[:, :, :L-k, :]     # [batch, H, L-k, d]
+                # Element-wise product summed over d, scaled by kernel
+                cb = (C_part * B_part).sum(dim=-1)  # [batch, H, L-k]
+                k_val = K_avg[:, k:k+1]  # [batch, 1]
 
-    def _semi_separable_weight(self, x: torch.Tensor) -> torch.Tensor:
-        """T_ij = C_i · (∏_{k=j+1}^{i-1} A_k) · B_j → lower triangular L×L"""
-        B, L, D = x.shape
+                # Fill diagonal
+                idx = torch.arange(L - k, device=T.device)
+                T[:, :, idx + k, idx] = cb * k_val.unsqueeze(1)
 
-        # Input-dependent A, B, C
-        A = torch.sigmoid(self.W_A(x))  # [B, L, D] in (0, 1) for stability
-        B_feat = self.W_B(x)            # [B, L, D]
-        C = self.W_C(x)                 # [B, L, D]
+        return T
 
-        # Average over dim to get scalar transitions per position
-        # For simplicity, we compute per-head with averaged features
-        A = A.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B, H, L, d]
-        B_feat = B_feat.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        C = C.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+    def _semi_separable(self, B_h, C_h, S):
+        """T_ij = C_i · (∏_{k=j+1}^{i-1} A_k) · B_j - recurrence structure"""
+        # S: [batch, L, dim] - state transition A
+        batch, H, L, d = B_h.shape
 
-        # Construct lower triangular T explicitly
-        # T[i,j] = C[i] · A[i-1] · A[i-2] · ... · A[j+1] · B[j]  for i >= j
-        # This is O(L²) but explicit
-        T = torch.zeros(B, self.num_heads, L, L, device=x.device, dtype=x.dtype)
+        # Reshape A to heads
+        A_h = S.view(batch, L, H, d).permute(0, 2, 1, 3)  # [batch, H, L, d]
+
+        # Build lower triangular T explicitly
+        T = torch.zeros(batch, H, L, L, device=B_h.device, dtype=B_h.dtype)
+
+        # Precompute cumulative products of A for efficiency
+        # cum_A[i] = A_1 * A_2 * ... * A_i
+        cum_A = torch.ones(batch, H, L, d, device=A_h.device, dtype=A_h.dtype)
+        for i in range(1, L):
+            cum_A[:, :, i] = cum_A[:, :, i-1] * A_h[:, :, i]
 
         for i in range(L):
             for j in range(i + 1):
-                # Compute C_i · (prod of A's) · B_j
-                c_i = C[:, :, i, :]      # [B, H, d]
-                b_j = B_feat[:, :, j, :] # [B, H, d]
+                c_i = C_h[:, :, i, :]  # [batch, H, d]
+                b_j = B_h[:, :, j, :]  # [batch, H, d]
 
-                # Product of A's from j+1 to i-1
                 if i == j:
-                    # T[i,i] = C_i · B_i (no A's in between)
+                    # T[i,i] = C_i · B_i (no A's)
                     prod = torch.ones_like(c_i)
                 else:
-                    prod = torch.ones_like(c_i)
-                    for k in range(j + 1, i):
-                        prod = prod * A[:, :, k, :]
+                    # T[i,j] = C_i · (A_{j+1} · ... · A_{i-1}) · B_j
+                    # = C_i · (cum_A[i-1] / cum_A[j]) · B_j
+                    if j == 0:
+                        prod = cum_A[:, :, i-1] if i > 0 else torch.ones_like(c_i)
+                    else:
+                        prod = cum_A[:, :, i-1] / (cum_A[:, :, j-1] + 1e-8)
 
-                # T[i,j] = sum over d of (c_i * prod * b_j)
                 T[:, :, i, j] = (c_i * prod * b_j).sum(dim=-1)
 
-        return T  # [B, H, L, L]
+        return T
 
 
 # =============================================================================
-# Channel Mixing Weight Generators
+# Channel Mixing Weight Generator
 # =============================================================================
 
 class ChannelMixWeightGenerator(nn.Module):
-    """Generates the d×d channel mixing matrix based on type.
-
-    The output is ALWAYS an explicit [d_out, d_in] matrix.
-    The actual mixing is always: output = input @ W.T
-    """
+    """Generates d×d channel mixing matrix."""
 
     def __init__(self, dim_in: int, dim_out: int, mix_type: ChannelMixType,
                  num_heads: int = 1):
@@ -213,98 +300,30 @@ class ChannelMixWeightGenerator(nn.Module):
         self.num_heads = num_heads
 
         if mix_type == ChannelMixType.DIAGONAL:
-            # Diagonal: only d parameters
             self.weight = nn.Parameter(torch.ones(min(dim_in, dim_out)))
 
         elif mix_type == ChannelMixType.DENSE:
-            # Dense: full d_out × d_in matrix
             self.weight = nn.Parameter(torch.randn(dim_out, dim_in) * 0.02)
 
         elif mix_type == ChannelMixType.GROUPED:
-            # Block diagonal: h blocks of (d_out/h) × (d_in/h)
             assert dim_in % num_heads == 0 and dim_out % num_heads == 0
-            head_dim_in = dim_in // num_heads
-            head_dim_out = dim_out // num_heads
-            # Store as [H, d_out/H, d_in/H]
-            self.weight = nn.Parameter(torch.randn(num_heads, head_dim_out, head_dim_in) * 0.02)
+            h_in, h_out = dim_in // num_heads, dim_out // num_heads
+            self.weight = nn.Parameter(torch.randn(num_heads, h_out, h_in) * 0.02)
 
     def forward(self) -> torch.Tensor:
-        """Generate the channel mixing matrix W.
-
-        Returns:
-            W: [d_out, d_in] - the explicit mixing matrix
-        """
+        """Generate channel mixing matrix W: [dim_out, dim_in]"""
         if self.mix_type == ChannelMixType.DIAGONAL:
-            return self._diagonal_weight()
+            d = len(self.weight)
+            W = torch.diag(self.weight)
+            if self.dim_out != d or self.dim_in != d:
+                W = F.pad(W, (0, max(0, self.dim_in - d), 0, max(0, self.dim_out - d)))
+            return W[:self.dim_out, :self.dim_in]
+
         elif self.mix_type == ChannelMixType.DENSE:
-            return self._dense_weight()
+            return self.weight
+
         elif self.mix_type == ChannelMixType.GROUPED:
-            return self._grouped_weight()
-
-    def _diagonal_weight(self) -> torch.Tensor:
-        """W_{αβ} = w_α * δ_{αβ} → diagonal matrix"""
-        d = len(self.weight)
-        W = torch.diag(self.weight)
-        # Pad if dim_out != dim_in
-        if self.dim_out > d:
-            W = F.pad(W, (0, 0, 0, self.dim_out - d))
-        if self.dim_in > d:
-            W = F.pad(W, (0, self.dim_in - d, 0, 0))
-        return W[:self.dim_out, :self.dim_in]
-
-    def _dense_weight(self) -> torch.Tensor:
-        """W_{αβ} = learned dense matrix"""
-        return self.weight
-
-    def _grouped_weight(self) -> torch.Tensor:
-        """W = block_diag(W_1, W_2, ..., W_h) → block diagonal"""
-        # weight: [H, d_out/H, d_in/H]
-        H = self.num_heads
-        W = torch.block_diag(*[self.weight[h] for h in range(H)])
-        return W
-
-
-# =============================================================================
-# Unified Featurizer
-# =============================================================================
-
-class UnifiedFeaturizer(nn.Module):
-    """Featurizer that produces features for both token and channel mixing.
-
-    Given input x, produces:
-    - Features for token mixing weight generation (Q, K for low-rank; A, B, C for recurrence; etc.)
-    - Value tensor V that will be mixed by the token mixing matrix
-    """
-
-    def __init__(self, dim: int, num_heads: int = 1, expansion: int = 1):
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.expansion = expansion
-
-        # Value projection (what gets mixed)
-        self.W_V = nn.Linear(dim, dim * expansion)
-
-        # Output projection (after mixing)
-        if expansion != 1:
-            self.W_O = nn.Linear(dim * expansion, dim)
-        else:
-            self.W_O = nn.Linear(dim, dim)
-
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Extract features from input.
-
-        Returns:
-            dict with 'V' (values to be mixed) and 'x' (original for weight gen)
-        """
-        B, L, D = x.shape
-        V = self.W_V(x)  # [B, L, D*expansion]
-
-        if self.expansion == 1:
-            V = V.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-
-        return {'V': V, 'x': x}
+            return torch.block_diag(*[self.weight[h] for h in range(self.num_heads)])
 
 
 # =============================================================================
@@ -312,123 +331,121 @@ class UnifiedFeaturizer(nn.Module):
 # =============================================================================
 
 class UnifiedLIV(nn.Module):
-    """Unified LIV operator where mixing is ALWAYS explicit matrix multiplication.
+    """Unified LIV: Y = C_mix @ (T @ V)
 
-    Y = C @ (T @ V)
+    Where T = token_mixing_weight(B, C, S) is ALWAYS an explicit L×L matrix.
 
-    where:
-    - T = token_mix_weight_gen(x) produces [B, H, L, L]
-    - V = featurizer(x)['V'] is [B, H, L, d]
-    - C = channel_mix_weight_gen() produces [d_out, d_in]
+    All token mixing types use the same featurizer interface:
+    - B: input projection
+    - C: output projection
+    - S: structure parameter
 
-    The weight generators can be swapped during architecture search
-    while the core computation (matmul) stays fixed.
+    This allows swapping token/channel mixing types while keeping
+    the core computation (explicit matmul) fixed.
     """
 
     def __init__(self, dim: int,
-                 token_mix_type: TokenMixType,
-                 channel_mix_type: ChannelMixType,
+                 token_mix_type: TokenMixType = TokenMixType.LOW_RANK,
+                 channel_mix_type: ChannelMixType = ChannelMixType.GROUPED,
                  num_heads: int = 8,
                  kernel_size: int = 3,
-                 expansion: int = 1,
-                 causal: bool = True):
+                 causal: bool = True,
+                 use_softmax: bool = True):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
 
-        # Weight generators (these define the structure of T)
+        # Featurizer: produces B, C, S, V (same interface for all types)
+        self.featurizer = UnifiedFeaturizer(
+            dim, num_heads, token_mix_type, kernel_size
+        )
+
+        # Token mixing weight generator
         self.token_mix_gen = TokenMixWeightGenerator(
-            dim, token_mix_type, num_heads, kernel_size, causal
+            dim, token_mix_type, num_heads, kernel_size, causal,
+            use_softmax=(token_mix_type == TokenMixType.LOW_RANK and use_softmax)
         )
+
+        # Channel mixing weight generator
         self.channel_mix_gen = ChannelMixWeightGenerator(
-            dim * expansion, dim, channel_mix_type, num_heads
+            dim, dim, channel_mix_type, num_heads
         )
 
-        # Featurizer (produces values to be mixed)
-        self.featurizer = UnifiedFeaturizer(dim, num_heads, expansion)
-
-        self.expansion = expansion
         self.token_mix_type = token_mix_type
+        self.channel_mix_type = channel_mix_type
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute Y = C @ (T @ V) with explicit matrices.
+        """Compute Y = C_mix @ (T @ V).
 
-        Args:
-            x: [batch, seq_len, dim]
-        Returns:
-            y: [batch, seq_len, dim]
+        1. Featurizer: x -> (B, C, S, V)
+        2. Token mixing: T = f(B, C, S), then T @ V
+        3. Channel mixing: result @ W^T
         """
-        B, L, D = x.shape
+        batch, seq_len, dim = x.shape
 
-        # 1. Generate token mixing matrix T: [B, H, L, L]
-        T = self.token_mix_gen(x)
-
-        # 2. Get values from featurizer
+        # 1. Extract features (unified interface)
         feat = self.featurizer(x)
-        V = feat['V']  # [B, H, L, head_dim] or [B, L, D*exp]
+        B, C, S, V = feat['B'], feat['C'], feat['S'], feat['V']
 
-        # 3. Token mixing: T @ V (explicit matmul!)
-        if self.expansion == 1:
-            # V: [B, H, L, head_dim], T: [B, H, L, L]
-            mixed = torch.matmul(T, V)  # [B, H, L, head_dim]
-            mixed = mixed.permute(0, 2, 1, 3).reshape(B, L, D)  # [B, L, D]
-        else:
-            # For expansion > 1, T is applied per-position (diagonal token mix case)
-            # V: [B, L, D*exp]
-            if T.dim() == 4:
-                # Reshape for batched matmul
-                T_avg = T.mean(dim=1)  # [B, L, L] average over heads
-                mixed = torch.matmul(T_avg, V)  # [B, L, D*exp]
-            else:
-                mixed = torch.matmul(T, V)
+        # 2. Generate token mixing matrix T: [batch, heads, L, L]
+        T = self.token_mix_gen(B, C, S)
 
-        # 4. Channel mixing: mixed @ C.T (explicit matmul!)
-        C = self.channel_mix_gen()  # [D, D*exp] or [D, D]
-        y = F.linear(mixed, C)  # [B, L, D]
+        # 3. Reshape V for multi-head and apply token mixing
+        V_h = V.view(batch, seq_len, self.num_heads, self.head_dim)
+        V_h = V_h.permute(0, 2, 1, 3)  # [batch, heads, L, head_dim]
 
-        return y
+        # Token mixing: T @ V (explicit matmul!)
+        mixed = torch.matmul(T, V_h)  # [batch, heads, L, head_dim]
+
+        # Reshape back
+        mixed = mixed.permute(0, 2, 1, 3).reshape(batch, seq_len, dim)
+
+        # 4. Channel mixing (explicit matmul!)
+        W = self.channel_mix_gen()  # [dim, dim]
+        output = F.linear(mixed, W)
+
+        return output
 
 
 # =============================================================================
-# Factory Functions
+# Factory & Presets
 # =============================================================================
 
-def create_unified_liv(
-    dim: int,
-    token_mix: int,    # 1=diagonal, 2=low_rank, 3=toeplitz, 4=semi_separable
-    channel_mix: int,  # 1=diagonal, 2=dense, 3=grouped
-    **kwargs
-) -> UnifiedLIV:
-    """Create a UnifiedLIV from integer type codes (like genome)."""
-    token_type = TokenMixType(token_mix)
-    channel_type = ChannelMixType(channel_mix)
-    return UnifiedLIV(dim, token_type, channel_type, **kwargs)
+def create_liv(dim: int, token_mix: int, channel_mix: int, **kwargs) -> UnifiedLIV:
+    """Create UnifiedLIV from integer codes.
+
+    token_mix: 1=diagonal, 2=low_rank, 3=toeplitz, 4=semi_separable
+    channel_mix: 1=diagonal, 2=dense, 3=grouped
+    """
+    return UnifiedLIV(
+        dim,
+        TokenMixType(token_mix),
+        ChannelMixType(channel_mix),
+        **kwargs
+    )
 
 
-# =============================================================================
-# Pre-defined Configurations (matching paper's LIV classes)
-# =============================================================================
-
-def SA1(dim: int, num_heads: int = 8, causal: bool = True) -> UnifiedLIV:
-    """Standard Attention: low-rank token + grouped channel"""
+# Preset configurations matching paper's LIV classes
+def SA1(dim: int, num_heads: int = 8, **kw) -> UnifiedLIV:
+    """Attention: low-rank token + grouped channel"""
     return UnifiedLIV(dim, TokenMixType.LOW_RANK, ChannelMixType.GROUPED,
-                      num_heads=num_heads, causal=causal)
+                      num_heads=num_heads, use_softmax=True, **kw)
 
-def Rec1(dim: int, num_heads: int = 8, causal: bool = True) -> UnifiedLIV:
-    """SSM-style Recurrence: semi-separable token + diagonal channel"""
+def Rec1(dim: int, num_heads: int = 8, **kw) -> UnifiedLIV:
+    """SSM: semi-separable token + diagonal channel"""
     return UnifiedLIV(dim, TokenMixType.SEMI_SEPARABLE, ChannelMixType.DIAGONAL,
-                      num_heads=num_heads, causal=causal)
+                      num_heads=num_heads, use_softmax=False, **kw)
 
-def GConv1(dim: int, num_heads: int = 8, kernel_size: int = 3) -> UnifiedLIV:
-    """Gated Convolution: toeplitz token + diagonal channel"""
+def GConv1(dim: int, num_heads: int = 8, kernel_size: int = 3, **kw) -> UnifiedLIV:
+    """Conv: toeplitz token + diagonal channel"""
     return UnifiedLIV(dim, TokenMixType.TOEPLITZ, ChannelMixType.DIAGONAL,
-                      num_heads=num_heads, kernel_size=kernel_size)
+                      num_heads=num_heads, kernel_size=kernel_size, use_softmax=False, **kw)
 
-def GMemless(dim: int, expansion: int = 4) -> UnifiedLIV:
-    """SwiGLU/FFN: diagonal token + dense channel"""
+def GMemless(dim: int, num_heads: int = 1, **kw) -> UnifiedLIV:
+    """FFN: diagonal token + dense channel"""
     return UnifiedLIV(dim, TokenMixType.DIAGONAL, ChannelMixType.DENSE,
-                      num_heads=1, expansion=expansion)
+                      num_heads=num_heads, use_softmax=False, **kw)
 
 
 # =============================================================================
@@ -445,3 +462,24 @@ class UnifiedLIVBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.liv(self.norm(x))
+
+
+class STARBackbone(nn.Module):
+    """Stack of UnifiedLIV blocks."""
+
+    def __init__(self, configs: list, dim: int, **kwargs):
+        """
+        Args:
+            configs: list of (token_mix_type, channel_mix_type) tuples
+            dim: model dimension
+        """
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            UnifiedLIVBlock(dim, create_liv(dim, t, c, **kwargs))
+            for t, c in configs
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return x

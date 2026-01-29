@@ -20,6 +20,8 @@ Featurizer classes 1-9 each produce {B, C, S, V} with class-specific logic:
 - Classes 5-6: Recurrence variants (expansion 16×, 2×)
 - Classes 7-8: Convolution variants (explicit, implicit kernel)
 - Class 9: SwiGLU / FFN (gated memoryless)
+
+NOTE: Sparsity(T/F) not yet implemented, non-linearity, 
 """
 
 import torch
@@ -628,6 +630,116 @@ class ChannelMixWeightGenerator(nn.Module):
 
         elif self.mix_type == ChannelMixType.GROUPED:
             return torch.block_diag(*[self.weight[h] for h in range(self.num_heads)])
+
+
+class InputVaryingChannelMixGenerator(nn.Module):
+    """Input-dependent channel mixing: W(x) is computed from input.
+
+    Unlike ChannelMixWeightGenerator where W is a static nn.Parameter,
+    here W is generated per-token from the input, making the full
+    T_ij^{αβ}(x) truly input-varying in BOTH token and channel dimensions.
+
+    Generates a [batch, seq_len, dim_out, dim_in] matrix — a different
+    W per position, computed by a lightweight network from x.
+    """
+
+    def __init__(self, dim_in: int, dim_out: int, mix_type: ChannelMixType,
+                 num_heads: int = 1, bottleneck: int = None):
+        super().__init__()
+        self.dim_in = dim_in
+        self.dim_out = dim_out
+        self.mix_type = mix_type
+        self.num_heads = num_heads
+
+        # Input dim for the generator is dim_in (takes the mixed features as context)
+        # Bottleneck keeps param count manageable
+        neck = bottleneck or max(dim_in // 4, 1)
+
+        if mix_type == ChannelMixType.DIAGONAL:
+            # Generate dim_out diagonal entries from input
+            d = min(dim_in, dim_out)
+            self.net = nn.Sequential(
+                nn.Linear(dim_in, neck),
+                nn.SiLU(),
+                nn.Linear(neck, d),
+            )
+
+        elif mix_type == ChannelMixType.DENSE:
+            # Generate full dim_out × dim_in matrix from input
+            self.net = nn.Sequential(
+                nn.Linear(dim_in, neck),
+                nn.SiLU(),
+                nn.Linear(neck, dim_out * dim_in),
+            )
+
+        elif mix_type == ChannelMixType.GROUPED:
+            # Generate block-diagonal: h blocks of (dim_out/h × dim_in/h)
+            assert dim_in % num_heads == 0 and dim_out % num_heads == 0
+            h_in = dim_in // num_heads
+            h_out = dim_out // num_heads
+            self.net = nn.Sequential(
+                nn.Linear(dim_in, neck),
+                nn.SiLU(),
+                nn.Linear(neck, num_heads * h_out * h_in),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate input-dependent channel mixing matrix.
+
+        Args:
+            x: [batch, seq_len, dim_in] — the mixed features (after token mixing)
+
+        Returns:
+            W: [batch, seq_len, dim_out, dim_in] — per-position mixing matrix
+        """
+        if self.mix_type == ChannelMixType.DIAGONAL:
+            return self._diagonal(x)
+        elif self.mix_type == ChannelMixType.DENSE:
+            return self._dense(x)
+        elif self.mix_type == ChannelMixType.GROUPED:
+            return self._grouped(x)
+
+    def _diagonal(self, x: torch.Tensor) -> torch.Tensor:
+        batch, L, _ = x.shape
+        d = min(self.dim_in, self.dim_out)
+        diag_vals = self.net(x)  # [batch, L, d]
+        W = torch.diag_embed(diag_vals)  # [batch, L, d, d]
+        if self.dim_out != d or self.dim_in != d:
+            W = F.pad(W, (0, max(0, self.dim_in - d), 0, max(0, self.dim_out - d)))
+        return W[:, :, :self.dim_out, :self.dim_in]
+
+    def _dense(self, x: torch.Tensor) -> torch.Tensor:
+        batch, L, _ = x.shape
+        W = self.net(x)  # [batch, L, dim_out * dim_in]
+        return W.view(batch, L, self.dim_out, self.dim_in)
+
+    def _grouped(self, x: torch.Tensor) -> torch.Tensor:
+        batch, L, _ = x.shape
+        H = self.num_heads
+        h_in = self.dim_in // H
+        h_out = self.dim_out // H
+        blocks = self.net(x).view(batch, L, H, h_out, h_in)  # [B, L, H, ho, hi]
+
+        # Assemble block-diagonal per position
+        W = torch.zeros(batch, L, self.dim_out, self.dim_in,
+                        device=x.device, dtype=x.dtype)
+        for h in range(H):
+            r = h * h_out
+            c = h * h_in
+            W[:, :, r:r+h_out, c:c+h_in] = blocks[:, :, h]
+        return W
+
+    def apply_to(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate W(x) and apply it: output_i = W(x_i) @ x_i.
+
+        Args:
+            x: [batch, seq_len, dim_in]
+        Returns:
+            y: [batch, seq_len, dim_out]
+        """
+        W = self.forward(x)  # [batch, L, dim_out, dim_in]
+        # Per-position matmul: y_i = W_i @ x_i
+        return torch.einsum('bloi,bli->blo', W, x)
 
 
 # =============================================================================

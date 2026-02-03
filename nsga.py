@@ -770,6 +770,7 @@ def evolve(
     include_extended: bool = False,
     seed: Optional[int] = None,
     callback: Optional[Callable] = None,
+    class_pool: Optional[Dict[int, LIVClassSpec]] = None,
     **kwargs,
 ) -> List[Individual]:
     """Run NSGA-II evolution loop.
@@ -788,13 +789,16 @@ def evolve(
         include_extended: Include Rec3/Rec4 in the class pool.
         seed: Random seed for reproducibility.
         callback: Optional callable (generation, population) called each gen.
+        class_pool: Optional custom class pool. If None, built from
+            include_extended. Use to restrict search to specific LIV families.
         **kwargs: Extra keyword arguments passed to LIV builders.
 
     Returns:
         Final population sorted by (rank, -crowding_distance).
     """
     rng = random.Random(seed)
-    class_pool = build_class_pool(include_extended)
+    if class_pool is None:
+        class_pool = build_class_pool(include_extended)
     evaluator = FitnessEvaluator(class_pool, dim, quality_fn, **kwargs)
 
     # Initialize population
@@ -938,6 +942,7 @@ def search(
     num_layers: int,
     dim: int,
     quality_fn: Optional[Callable] = None,
+    class_pool: Optional[Dict[int, LIVClassSpec]] = None,
     **kwargs,
 ) -> SearchResult:
     """Run STAR architecture search.
@@ -947,6 +952,7 @@ def search(
         dim: Model dimension.
         quality_fn: Optional callable (model, genome) -> float for training-
             based quality evaluation. If None, parameter count is used as proxy.
+        class_pool: Optional custom class pool to restrict search space.
         **kwargs: All other arguments passed to evolve().
 
     Returns:
@@ -960,13 +966,15 @@ def search(
                     "causal", "use_softmax"):
             build_kwargs[key] = kwargs.pop(key)
 
-    class_pool = build_class_pool(include_extended)
+    if class_pool is None:
+        class_pool = build_class_pool(include_extended)
 
     population = evolve(
         num_layers=num_layers,
         dim=dim,
         quality_fn=quality_fn,
         include_extended=include_extended,
+        class_pool=class_pool,
         **kwargs,
     )
 

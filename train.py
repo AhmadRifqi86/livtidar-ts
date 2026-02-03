@@ -84,6 +84,47 @@ class STARLanguageModel(nn.Module):
         return logits, loss
 
 
+class STARVisionModel(nn.Module):
+    """Vision model: patch_embed -> LIV backbone (causal=False) -> pool -> head.
+
+    Build the backbone with causal=False:
+        backbone = GenomeModelBuilder(pool, dim, causal=False).build(genome)
+        model = STARVisionModel(backbone, num_classes=10, dim=64)
+    """
+
+    def __init__(self, backbone, num_classes, dim,
+                 img_size=32, patch_size=4, in_channels=3):
+        super().__init__()
+        assert img_size % patch_size == 0
+        self.num_patches = (img_size // patch_size) ** 2
+
+        self.patch_embed = nn.Conv2d(
+            in_channels, dim, kernel_size=patch_size, stride=patch_size,
+        )
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, self.num_patches, dim) * 0.02
+        )
+        self.backbone = backbone
+        self.norm = RMSNorm(dim)
+        self.head = nn.Linear(dim, num_classes)
+
+        nn.init.normal_(self.patch_embed.weight, std=0.02)
+        nn.init.zeros_(self.patch_embed.bias)
+
+    def forward(self, imgs, targets=None):
+        # [B, C, H, W] -> [B, num_patches, dim]
+        x = self.patch_embed(imgs).flatten(2).transpose(1, 2)
+        x = x + self.pos_embed
+        x = self.backbone(x)
+        # Global average pool -> classify
+        x = x.mean(dim=1)
+        logits = self.head(self.norm(x))
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits, targets)
+        return logits, loss
+
+
 # ============================================================================
 # Cosine LR with Linear Warmup (Paper Table A.1)
 # ============================================================================

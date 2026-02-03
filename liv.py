@@ -21,7 +21,8 @@ Featurizer classes 1-9 each produce {B, C, S, V} with class-specific logic:
 - Classes 7-8: Convolution variants (explicit, implicit kernel)
 - Class 9: SwiGLU / FFN (gated memoryless)
 
-NOTE: Sparsity(T/F) not yet implemented, non-linearity, 
+Non-linearity: configurable via NonLinearity enum on UnifiedLIV.
+Sparsity: implemented as SparsityMask (see commented usage in UnifiedLIV).
 """
 
 import torch
@@ -43,6 +44,37 @@ class ChannelMixType(Enum):
     DIAGONAL = 1  # W_{αβ} = w_α · δ_{αβ}
     DENSE = 2     # W_{αβ} = W[α,β]
     GROUPED = 3   # W = block_diag(W_1, ..., W_h)
+
+
+class NonLinearity(Enum):
+    """5-tuple axis 5: activation applied after token mixing.
+
+    SOFTMAX is special — applied to T matrix (row-wise) inside TokenMixWeightGenerator.
+    All others are applied element-wise to the mixed output (after T @ V, before channel mix).
+    """
+    NONE = 0
+    SOFTMAX = 1    # Row-wise on T (handled in TokenMixWeightGenerator)
+    SIGMOID = 2    # σ(mixed)
+    SILU = 3       # SiLU(mixed)
+    GELU = 4       # GELU(mixed)
+    RELU = 5       # ReLU(mixed)
+
+
+_NONLINEARITY_FN = {
+    NonLinearity.NONE: lambda x: x,
+    NonLinearity.SIGMOID: torch.sigmoid,
+    NonLinearity.SILU: F.silu,
+    NonLinearity.GELU: F.gelu,
+    NonLinearity.RELU: F.relu,
+}
+
+
+class SparsityType(Enum):
+    """5-tuple axis 4: sparsity pattern on token mixing matrix T."""
+    NONE = 0       # Dense T
+    CAUSAL = 1     # Lower-triangular (already handled by causal flag)
+    BANDED = 2     # Entries within bandwidth of diagonal
+    TOP_K = 3      # Keep only top-k values per row
 
 
 # =============================================================================
@@ -594,7 +626,7 @@ class TokenMixWeightGenerator(nn.Module):
 # Channel Mixing Weight Generator
 # =============================================================================
 
-class ChannelMixWeightGenerator(nn.Module):
+class ChannelMixWeightGeneratorOld(nn.Module):
     """Generates d_out × d_in channel mixing matrix."""
 
     def __init__(self, dim_in: int, dim_out: int, mix_type: ChannelMixType,
@@ -616,23 +648,28 @@ class ChannelMixWeightGenerator(nn.Module):
             h_in, h_out = dim_in // num_heads, dim_out // num_heads
             self.weight = nn.Parameter(torch.randn(num_heads, h_out, h_in) * 0.02)
 
-    def forward(self) -> torch.Tensor:
-        """Generate channel mixing matrix W: [dim_out, dim_in]"""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply static channel mixing: x @ W^T.
+
+        Args:
+            x: [batch, seq_len, dim_in]
+        Returns:
+            y: [batch, seq_len, dim_out]
+        """
         if self.mix_type == ChannelMixType.DIAGONAL:
             d = len(self.weight)
             W = torch.diag(self.weight)
             if self.dim_out != d or self.dim_in != d:
                 W = F.pad(W, (0, max(0, self.dim_in - d), 0, max(0, self.dim_out - d)))
-            return W[:self.dim_out, :self.dim_in]
-
+            W = W[:self.dim_out, :self.dim_in]
         elif self.mix_type == ChannelMixType.DENSE:
-            return self.weight
-
+            W = self.weight
         elif self.mix_type == ChannelMixType.GROUPED:
-            return torch.block_diag(*[self.weight[h] for h in range(self.num_heads)])
+            W = torch.block_diag(*[self.weight[h] for h in range(self.num_heads)])
+        return F.linear(x, W)
 
 
-class InputVaryingChannelMixGenerator(nn.Module):
+class ChannelMixGenerator(nn.Module):
     """Input-dependent channel mixing: W(x) is computed from input.
 
     Unlike ChannelMixWeightGenerator where W is a static nn.Parameter,
@@ -743,6 +780,65 @@ class InputVaryingChannelMixGenerator(nn.Module):
 
 
 # =============================================================================
+# Sparsity Mask (5-tuple axis 4) — NOT attached to UnifiedLIV
+# =============================================================================
+
+class SparsityMask(nn.Module):
+    """Applies sparsity pattern to token mixing matrix T: [batch, heads, L, L].
+
+    Args:
+        sparsity_type: Type of sparsity to apply.
+        bandwidth: For BANDED, half-width around diagonal.
+        top_k: For TOP_K, entries to keep per row.
+    """
+
+    def __init__(self, sparsity_type: SparsityType = SparsityType.NONE,
+                 bandwidth: int = 64, top_k: int = 32):
+        super().__init__()
+        self.sparsity_type = sparsity_type
+        self.bandwidth = bandwidth
+        self.top_k = top_k
+
+    def forward(self, T: torch.Tensor) -> torch.Tensor:
+        if self.sparsity_type == SparsityType.NONE:
+            return T
+
+        if self.sparsity_type == SparsityType.CAUSAL:
+            L = T.size(-1)
+            mask = torch.triu(torch.ones(L, L, device=T.device), diagonal=1).bool()
+            return T.masked_fill(mask, 0.0)
+
+        if self.sparsity_type == SparsityType.BANDED:
+            L = T.size(-1)
+            rows = torch.arange(L, device=T.device).unsqueeze(1)
+            cols = torch.arange(L, device=T.device).unsqueeze(0)
+            mask = (rows - cols).abs() > self.bandwidth
+            return T.masked_fill(mask, 0.0)
+
+        if self.sparsity_type == SparsityType.TOP_K:
+            k = min(self.top_k, T.size(-1))
+            vals, idx = T.topk(k, dim=-1)
+            sparse = torch.zeros_like(T)
+            sparse.scatter_(-1, idx, vals)
+            return sparse
+
+        return T
+
+
+# Usage example (NOT wired into UnifiedLIV):
+#
+#   sparsity = SparsityMask(SparsityType.BANDED, bandwidth=128)
+#   T = token_mix_gen(B, C, S)        # [batch, heads, L, L]
+#   T = sparsity(T)                   # apply band mask
+#   mixed = T @ V_h                   # sparse token mixing
+#
+#   # Or combined causal + banded:
+#   sparsity = SparsityMask(SparsityType.BANDED, bandwidth=64)
+#   T = token_mix_gen(B, C, S)        # already causal from token_mix_gen
+#   T = sparsity(T)                   # further restrict to band
+
+
+# =============================================================================
 # Unified LIV Operator
 # =============================================================================
 
@@ -768,10 +864,12 @@ class UnifiedLIV(nn.Module):
                  use_softmax: bool = True,
                  featurizer: FeaturizerBase = None,
                  featurizer_cls: int = None,
-                 expansion: int = 1):
+                 expansion: int = 1,
+                 nonlinearity: NonLinearity = NonLinearity.NONE):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
+        self.nonlinearity = nonlinearity
 
         # Build featurizer
         if featurizer is not None:
@@ -796,14 +894,19 @@ class UnifiedLIV(nn.Module):
         # For expanded dims, use 1 head so the full expanded dim is one "head"
         tmix_heads = num_heads if internal_dim == dim else 1
 
+        # Softmax: via nonlinearity enum or legacy use_softmax flag
+        _use_softmax = (nonlinearity == NonLinearity.SOFTMAX) or \
+                       (token_mix_type == TokenMixType.LOW_RANK and use_softmax)
+
         self.token_mix_gen = TokenMixWeightGenerator(
             internal_dim, token_mix_type, tmix_heads, kernel_size, causal,
-            use_softmax=(token_mix_type == TokenMixType.LOW_RANK and use_softmax)
+            use_softmax=_use_softmax,
         )
 
-        self.channel_mix_gen = ChannelMixWeightGenerator(
+        # Input-dependent channel mixing: W(x) computed per-token
+        self.channel_mix_gen = ChannelMixGenerator(
             internal_dim, dim, channel_mix_type,
-            num_heads if internal_dim == dim else 1
+            num_heads if internal_dim == dim else 1,
         )
 
         self.token_mix_type = token_mix_type
@@ -811,7 +914,10 @@ class UnifiedLIV(nn.Module):
         self._tmix_heads = tmix_heads
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute Y = C_mix @ (T @ V)."""
+        """Compute Y = σ(T(x) · V) through W(x).
+
+        Steps: featurize → token mix → nonlinearity → channel mix
+        """
         batch, seq_len, dim = x.shape
 
         # 1. Featurizer: x -> (B, C, S, V) at internal_dim
@@ -820,17 +926,24 @@ class UnifiedLIV(nn.Module):
 
         # 2. Token mixing matrix T: [batch, heads, L, L]
         T = self.token_mix_gen(B, C, S)
+        # Sparsity would be applied here (see SparsityMask):
+        #   T = self.sparsity_mask(T)
 
-        # 3. Reshape V for multi-head, apply T @ V
+        # 3. Nonlinearity σ on T (paper: Y = W · σ(T) · V)
+        #    SOFTMAX is already applied inside token_mix_gen.
+        #    Other nonlinearities are applied element-wise to T here.
+        if self.nonlinearity not in (NonLinearity.NONE, NonLinearity.SOFTMAX):
+            T = _NONLINEARITY_FN[self.nonlinearity](T)
+
+        # 4. Reshape V for multi-head, apply σ(T) @ V
         H = self._tmix_heads
         head_dim = self.featurizer.internal_dim // H
         V_h = V.view(batch, seq_len, H, head_dim).permute(0, 2, 1, 3)
         mixed = torch.matmul(T, V_h)  # [batch, H, L, head_dim]
         mixed = mixed.permute(0, 2, 1, 3).reshape(batch, seq_len, self.featurizer.internal_dim)
 
-        # 4. Channel mixing: internal_dim → dim
-        W = self.channel_mix_gen()
-        output = F.linear(mixed, W)
+        # 5. Input-dependent channel mixing: internal_dim → dim
+        output = self.channel_mix_gen(mixed)
 
         return output
 

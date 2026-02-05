@@ -75,6 +75,7 @@ class SparsityType(Enum):
     CAUSAL = 1     # Lower-triangular (already handled by causal flag)
     BANDED = 2     # Entries within bandwidth of diagonal
     TOP_K = 3      # Keep only top-k values per row
+    TIDAR_HYBRID = 4  # Causal prefix + bidirectional mask block (TiDAR)
 
 
 # =============================================================================
@@ -552,10 +553,6 @@ class TokenMixWeightGenerator(nn.Module):
             mask = torch.triu(torch.ones(seq_len, seq_len, device=T.device), diagonal=1).bool()
             T = T.masked_fill(mask, 0.0 if not self.use_softmax else float('-inf'))
 
-        # Optional softmax (for attention)
-        if self.use_softmax:
-            T = F.softmax(T, dim=-1)
-
         return T
 
     def _diagonal(self, B_h, C_h, S):
@@ -793,13 +790,14 @@ class SparsityMask(nn.Module):
     """
 
     def __init__(self, sparsity_type: SparsityType = SparsityType.NONE,
-                 bandwidth: int = 64, top_k: int = 32):
+                 bandwidth: int = 64, top_k: int = 32, use_softmax: bool = False):
         super().__init__()
         self.sparsity_type = sparsity_type
         self.bandwidth = bandwidth
         self.top_k = top_k
+        self.use_softmax = use_softmax
 
-    def forward(self, T: torch.Tensor) -> torch.Tensor:
+    def forward(self, T: torch.Tensor, clean_len: int = None) -> torch.Tensor:
         if self.sparsity_type == SparsityType.NONE:
             return T
 
@@ -821,6 +819,21 @@ class SparsityMask(nn.Module):
             sparse = torch.zeros_like(T)
             sparse.scatter_(-1, idx, vals)
             return sparse
+
+        if self.sparsity_type == SparsityType.TIDAR_HYBRID:
+            L = T.size(-1)
+            cl = clean_len if clean_len is not None else L // 2
+            fill = float('-inf') if self.use_softmax else 0.0
+            mask = torch.zeros(L, L, device=T.device, dtype=torch.bool)
+            # Clean prefix: causal among themselves
+            causal_mask = torch.triu(
+                torch.ones(cl, cl, device=T.device), diagonal=1
+            ).bool()
+            mask[:cl, :cl] = causal_mask
+            # Clean tokens cannot attend to mask tokens
+            mask[:cl, cl:] = True
+            # Mask tokens attend to everything (prefix + each other): no mask
+            return T.masked_fill(mask, fill)
 
         return T
 
@@ -865,7 +878,8 @@ class UnifiedLIV(nn.Module):
                  featurizer: FeaturizerBase = None,
                  featurizer_cls: int = None,
                  expansion: int = 1,
-                 nonlinearity: NonLinearity = NonLinearity.NONE):
+                 nonlinearity: NonLinearity = NonLinearity.NONE,
+                 sparsity_type: SparsityType = None):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -912,11 +926,22 @@ class UnifiedLIV(nn.Module):
         self.token_mix_type = token_mix_type
         self.channel_mix_type = channel_mix_type
         self._tmix_heads = tmix_heads
+        self._use_softmax = _use_softmax
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # External sparsity mask (e.g., TiDAR hybrid causal+bidirectional)
+        if sparsity_type is not None:
+            self.sparsity = SparsityMask(
+                sparsity_type, use_softmax=_use_softmax,
+            )
+            if sparsity_type == SparsityType.TIDAR_HYBRID:
+                self.token_mix_gen.causal = False
+        else:
+            self.sparsity = None
+
+    def forward(self, x: torch.Tensor, clean_len: int = None) -> torch.Tensor:
         """Compute Y = σ(T(x) · V) through W(x).
 
-        Steps: featurize → token mix → nonlinearity → channel mix
+        Steps: featurize → token mix → sparsity → softmax → nonlinearity → channel mix
         """
         batch, seq_len, dim = x.shape
 
@@ -926,12 +951,16 @@ class UnifiedLIV(nn.Module):
 
         # 2. Token mixing matrix T: [batch, heads, L, L]
         T = self.token_mix_gen(B, C, S)
-        # Sparsity would be applied here (see SparsityMask):
-        #   T = self.sparsity_mask(T)
 
-        # 3. Nonlinearity σ on T (paper: Y = W · σ(T) · V)
-        #    SOFTMAX is already applied inside token_mix_gen.
-        #    Other nonlinearities are applied element-wise to T here.
+        # 3. Sparsity mask (e.g., TiDAR hybrid causal+bidirectional)
+        if self.sparsity is not None:
+            T = self.sparsity(T, clean_len=clean_len)
+
+        # 4. Softmax normalization over unmasked positions
+        if self._use_softmax:
+            T = F.softmax(T, dim=-1)
+
+        # 5. Element-wise nonlinearity on T (non-softmax types only)
         if self.nonlinearity not in (NonLinearity.NONE, NonLinearity.SOFTMAX):
             T = _NONLINEARITY_FN[self.nonlinearity](T)
 
@@ -1049,8 +1078,8 @@ class UnifiedLIVBlock(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.liv = liv
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.liv(self.norm(x))
+    def forward(self, x: torch.Tensor, clean_len: int = None) -> torch.Tensor:
+        return x + self.liv(self.norm(x), clean_len=clean_len)
 
 
 class DifferentialLIV(nn.Module):
@@ -1061,8 +1090,8 @@ class DifferentialLIV(nn.Module):
         self.liv1 = build_fn(*args, **kwargs)
         self.liv2 = build_fn(*args, **kwargs)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.liv1(x) - self.liv2(x)
+    def forward(self, x: torch.Tensor, clean_len: int = None) -> torch.Tensor:
+        return self.liv1(x, clean_len=clean_len) - self.liv2(x, clean_len=clean_len)
 
 
 class STARBackbone(nn.Module):
@@ -1086,7 +1115,7 @@ class STARBackbone(nn.Module):
                 liv = create_liv(dim, t, c, **kwargs)
             self.blocks.append(UnifiedLIVBlock(dim, liv))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, clean_len: int = None) -> torch.Tensor:
         for block in self.blocks:
-            x = block(x)
+            x = block(x, clean_len=clean_len)
         return x

@@ -57,26 +57,26 @@ for name in ETTh1 ETTh2 ETTm1 ETTm2; do
 done
 
 # ---- Weather Dataset ----
-echo ""
-echo "[2/7] Downloading Weather dataset..."
-WEATHER_DIR="$DATA_DIR/weather"
-mkdir -p "$WEATHER_DIR"
+# echo ""
+# echo "[2/7] Downloading Weather dataset..."
+# WEATHER_DIR="$DATA_DIR/weather"
+# mkdir -p "$WEATHER_DIR"
 
-if [ -f "$WEATHER_DIR/weather.csv" ]; then
-    echo "  - weather.csv already exists, skipping."
-else
-    wget -q --show-progress \
-        "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/weather.csv" \
-        -O "$WEATHER_DIR/weather.csv" 2>/dev/null || {
-        # Fallback: download from Time-Series-Library or autoformer
-        echo "  - Primary source failed. Trying alternative source..."
-        download_from_gdrive "1aKEBqFSqGBGwFq4zzPMOEB0TfLHOYmDv" "$WEATHER_DIR/weather.csv.zip"
-        if [ -f "$WEATHER_DIR/weather.csv.zip" ]; then
-            unzip -o "$WEATHER_DIR/weather.csv.zip" -d "$WEATHER_DIR/" && rm "$WEATHER_DIR/weather.csv.zip"
-        fi
-    }
-    echo "  - weather.csv downloaded."
-fi
+# if [ -f "$WEATHER_DIR/weather.csv" ]; then
+#     echo "  - weather.csv already exists, skipping."
+# else
+#     wget -q --show-progress \
+#         "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/weather.csv" \
+#         -O "$WEATHER_DIR/weather.csv" 2>/dev/null || {
+#         # Fallback: download from Time-Series-Library or autoformer
+#         echo "  - Primary source failed. Trying alternative source..."
+#         download_from_gdrive "1aKEBqFSqGBGwFq4zzPMOEB0TfLHOYmDv" "$WEATHER_DIR/weather.csv.zip"
+#         if [ -f "$WEATHER_DIR/weather.csv.zip" ]; then
+#             unzip -o "$WEATHER_DIR/weather.csv.zip" -d "$WEATHER_DIR/" && rm "$WEATHER_DIR/weather.csv.zip"
+#         fi
+#     }
+#     echo "  - weather.csv downloaded."
+# fi
 
 # ---- Electricity Dataset ----
 echo ""
@@ -121,22 +121,22 @@ else
 fi
 
 # ---- ILI (Influenza-Like Illness) Dataset ----
-echo ""
-echo "[5/7] Downloading ILI dataset..."
-ILI_DIR="$DATA_DIR/illness"
-mkdir -p "$ILI_DIR"
+# echo ""
+# echo "[5/7] Downloading ILI dataset..."
+# ILI_DIR="$DATA_DIR/illness"
+# mkdir -p "$ILI_DIR"
 
-if [ -f "$ILI_DIR/national_illness.csv" ]; then
-    echo "  - national_illness.csv already exists, skipping."
-else
-    wget -q --show-progress \
-        "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/national_illness.csv" \
-        -O "$ILI_DIR/national_illness.csv" 2>/dev/null || {
-        echo "  - Primary source failed. Trying Google Drive..."
-        download_from_gdrive "1UbDd8klLd7Y_h8nI_D1R5-xJPPUvuiRR" "$ILI_DIR/national_illness.csv"
-    }
-    echo "  - national_illness.csv downloaded."
-fi
+# if [ -f "$ILI_DIR/national_illness.csv" ]; then
+#     echo "  - national_illness.csv already exists, skipping."
+# else
+#     wget -q --show-progress \
+#         "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/national_illness.csv" \
+#         -O "$ILI_DIR/national_illness.csv" 2>/dev/null || {
+#         echo "  - Primary source failed. Trying Google Drive..."
+#         download_from_gdrive "1UbDd8klLd7Y_h8nI_D1R5-xJPPUvuiRR" "$ILI_DIR/national_illness.csv"
+#     }
+#     echo "  - national_illness.csv downloaded."
+# fi
 
 # ---- Exchange Rate Dataset ----
 echo ""

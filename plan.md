@@ -16,7 +16,306 @@ Current time series forecasting models use fixed architectural choices:
 
 ---
 
-## 2. Core Idea
+## 2. Technical Background
+
+### 2.1 LIV — Linear Input-Varying Systems
+
+A LIV operator computes output Y from input x via a **mixing matrix T whose entries depend on the input itself**:
+
+```
+Y_i = Σ_j T_ij(x) · x_j          (token mixing)
+Y    = W · mixed                    (channel mixing, W is a static learned parameter)
+```
+
+The token mixing matrix T factorises as:
+
+```
+T_ij = C_i · M_ij · B_j
+```
+
+where B, C are input-dependent projections (the *featurizer*), M_ij is a **structural matrix** that determines the operator family, and the output before channel mixing is `mixed_i = Σ_j T_ij · V_j`.
+
+**Token mixing types** — the four choices of M_ij and their implications:
+
+**DIAGONAL** — `M_ij = δ_ij`
+```
+T_ij = C_i · B_i · δ_ij   →   T = diag(C ⊙ B)
+mixed_i = (C_i · B_i) · V_i          (each token mixes only with itself)
+```
+- No cross-token interaction — equivalent to element-wise gating
+- Used by FFN / SwiGLU; C is typically set to all-ones, so `T[i,i] = B_i`
+- Cost: O(L·d) — no quadratic dependency on sequence length
+
+**LOW_RANK** — `M_ij = 1` (outer product, scaled)
+```
+T_ij = C_i · B_j / √d     →   T = C Bᵀ / √d    (L×L matrix)
+mixed_i = Σ_j T_ij · V_j              (every token attends to every other)
+```
+- Softmax-normalised → standard attention; without softmax → linear attention
+- Used by attention variants SA-1 through SA-4
+- Cost: O(L²·d) — quadratic in sequence length; dominant for long sequences
+
+**TOEPLITZ** — `M_ij = K_{i−j}` (convolution kernel)
+```
+T_ij = C_i · K_{i-j} · B_j           (non-zero only when |i−j| < kernel_size)
+mixed_i = Σ_{j: |i-j|<k} T_ij · V_j  (each token mixes within a window)
+```
+- Shift-equivariant: same kernel K applied at every position
+- K is either an explicit learnable parameter (GConv-1) or generated from global context by an MLP (GConv-2)
+- Cost: O(L·kernel_size·d) — linear for short kernels, grows with kernel_size
+
+**SEMI_SEPARABLE** — `M_ij = ∏_{k=j}^{i−1} A_k` (state-space recurrence)
+```
+T_ij = C_i · (∏_{k=j}^{i-1} A_k) · B_j   for j ≤ i   (lower-triangular by construction)
+     = 0                                    for j > i
+mixed_i = Σ_{j≤i} T_ij · V_j              (state-space: all past tokens, decaying weight)
+```
+- A_k ∈ (0,1) per step — controls how fast past information decays
+- Causally lower-triangular by construction (no masking needed)
+- Used by SSM / Mamba variants; equivalent to a recurrent hidden state
+- Cost: O(L·d) in sequential form; O(L²·d) in the explicit matrix form used here
+
+The four types trade off **context range** against **sequence-length cost**:
+
+```
+DIAGONAL:        no context (each position independent)         — O(L·d)
+TOEPLITZ:        local context (within kernel_size window)      — O(L·k·d)
+SEMI_SEPARABLE:  full causal context (all past, decaying)       — O(L·d) recurrent
+LOW_RANK:        full bidirectional context (all positions)     — O(L²·d)
+```
+
+---
+
+**Featurizer classes** define *how* the input x is projected into B, C, S, V. Each class pairs a specific projection strategy with a compatible token mix type. The `internal_dim` may differ from `dim` due to expansion, and is always projected back to `dim` by channel mixing.
+
+**Attention family (token mix: LOW_RANK, internal_dim = dim)**
+
+| Class | Operator | B (key) | C (query) | V (value) | Special |
+|---|---|---|---|---|---|
+| 1 — SA-1 | Standard MHA | W_K(x) | W_Q(x) | W_V(x) | Full dim for all heads |
+| 2 — SA-2 | Conv-pre MHA | W_K(x̃) | W_Q(x̃) | W_V(x̃) | x̃ = depthwise-conv(x) before projection |
+| 3 — SA-3 | MQA | W_K(x) → repeated h× | W_Q(x) | W_V(x) → repeated h× | 1 KV head shared across all Q heads |
+| 4 — SA-4 | GQA | W_K(x) → repeated 2× | W_Q(x) | W_V(x) → repeated 2× | h/2 KV heads, each serving 2 Q heads |
+
+SA-2 applies a causal depthwise Conv1d (kernel=3) to x before all projections, giving local context awareness inside the attention featurizer itself. SA-3/SA-4 reduce KV parameter count by sharing heads; SA-3 is the extreme (1 KV head), SA-4 is moderate (h/2 KV heads).
+
+**Recurrence family (token mix: SEMI_SEPARABLE)**
+
+| Class | Operator | internal_dim | B | C | S (transition A) | V |
+|---|---|---|---|---|---|---|
+| 5 — Rec-1 | Mamba-like SSM | dim × 16 | W_B(x) | W_C(x) | sigmoid(W_A(x) + A_log) | W_V(x) |
+| 6 — Rec-2 | Compact SSM | dim × 2 | W_B(x) | W_C(x) | sigmoid(W_A(x) + A_log) | W_V(x) |
+| 10 — Disc-SSM | S4/Mamba (discretized) | dim × 16 | Δ · W_B(x) | W_C(x) | exp(Δ · A_log) | W_V(x) |
+| 11 — CfC | Liquid / CfC | dim × 16 | (1−gate) · W_in(x) | W_C(x) | gate = σ(W_gate(x)) | W_V(x) |
+
+`A_log` is a learnable parameter (negative for Disc-SSM for stability). The key difference:
+- Rec-1/2: A is purely input-dependent via `sigmoid(W_A(x) + A_log)`
+- Disc-SSM: uses Euler discretization `Δ = softplus(W_dt(x))`, then `A_bar = exp(Δ · A_log)`, `B_bar = Δ · W_B(x)` — matches the S4/Mamba continuous-time parameterization
+- CfC: `A = gate`, `B = (1−gate) · g(x)` — convex interpolation between past state and new input; `A + B_coeff = 1` per element
+
+**Convolution family (token mix: TOEPLITZ, internal_dim = dim)**
+
+| Class | Operator | B | C | S (kernel) | V |
+|---|---|---|---|---|---|
+| 7 — GConv-1 | Short gated conv | sigmoid(W_B(x)) | sigmoid(W_C(x)) | Explicit `nn.Parameter` [dim, 3] | x (raw) |
+| 8 — GConv-2 | Long gated conv | sigmoid(W_B(x)) | sigmoid(W_C(x)) | MLP(mean(x)) → [dim, 64] | x (raw) |
+
+GConv-1's kernel S is a fixed learned parameter — the same 3 taps for every input. GConv-2 generates a 64-tap kernel from the **global average** of x via a 2-layer MLP, making it input-dependent (Hyena / implicit-kernel style). V = x directly (no projection) for both, keeping parameter count low.
+
+**Memoryless family (token mix: DIAGONAL, internal_dim = dim × 4)**
+
+| Class | Operator | B | C | V |
+|---|---|---|---|---|
+| 9 — GMemless | SwiGLU FFN | SiLU(W_gate(x)) | ones (unused) | W_value(x) |
+
+The diagonal T means `mixed_i = B_i · V_i` — a gated element-wise product (SwiGLU). No cross-token interaction. C = 1 so the featurizer effectively contributes only a gate (B) and a value (V). Channel mixing (DENSE) provides the output projection back to dim.
+
+Each LIV class also has a **differential variant** (classes 10–17 in the base pool) that computes `LIV_1(x) − LIV_2(x)` using two independent instances of the same featurizer, increasing expressiveness at roughly 2× the parameter cost.
+
+**Channel mixing** projects the token-mixed output across the feature dimension using a static learned matrix W (paper definition — does **not** depend on input):
+
+```
+Y_i^α = Σ_β W_αβ · mixed_i^β          (applied per token position i)
+```
+
+W_αβ is a fixed `nn.Parameter` whose structure is determined by the channel mix type:
+
+| W_αβ structure | Type | Effect |
+|---|---|---|
+| w_α · δ_αβ | DIAGONAL | Per-channel scalar scaling only; no cross-channel interaction; equivalent to a learned per-dimension gain |
+| W[α, β] (full matrix) | DENSE | All channels mix freely; most expressive; equivalent to a standard `nn.Linear` without bias |
+| block_diag(W_1, …, W_h) | GROUPED | dim split into h equal head-sized groups; each group mixes independently; equivalent to h parallel small dense layers |
+
+The three types trade off expressiveness against parameter count:
+
+```
+DIAGONAL:  params = dim                       (cheapest — just a scale vector)
+GROUPED:   params = h × (dim/h)² = dim²/h    (intermediate — h small dense blocks)
+DENSE:     params = dim²                      (most expensive — full projection)
+```
+
+In the genome 5-tuple the channel mix type is axis 3. Common pairings from the paper:
+- Attention (LOW_RANK token) → GROUPED (multi-head output projection)
+- SSM / Conv (SEMI_SEPARABLE / TOEPLITZ token) → DIAGONAL (channel-independent state)
+- FFN / SwiGLU (DIAGONAL token) → DENSE (full output projection)
+
+Each LIV block is encoded in a genome as a **5-tuple**: `(featurizer_class, token_mix_type, channel_mix_type, sparsity_pattern, nonlinearity)`.
+
+---
+
+### 2.2 NSGA-II — Evolutionary Architecture Search
+
+NSGA-II simultaneously minimises three objectives without weighting:
+
+| Objective | Measure | Lower = better |
+|---|---|---|
+| Quality | val loss / MSE after N steps | ✓ |
+| Parameters | total unique parameter count | ✓ |
+| KV-cache | inference state size estimate | ✓ |
+
+**Genome encoding** — each genome is a list of *N* `LayerGene` tuples:
+
+```
+LayerGene = (liv_class, feat_share_group, feat_share_strategy,
+             fg_share_group, fg_share_bitmask)
+```
+
+- `feat_share_strategy=2` → two layers in the same group share one featurizer instance (weight tying)
+- `fg_share_bitmask` → selectively shares B / C / S / V projection weights between layers
+
+**Evolution loop (one generation)**:
+
+```
+1. Evaluate population → (quality, params, kv_cache) per individual
+2. Non-dominated sort → assign rank (0 = Pareto front)
+3. Crowding distance → secondary sort within each rank
+4. Tournament selection → pick parents proportional to rank + distance
+5. Crossover (multi-point on layer list) → produce offspring genomes
+6. Mutation (random per-gene with prob p) → explore new operators
+7. repair() → clamp sharing indices to [0, n_layers−1]
+8. Replace population, repeat
+```
+
+Default: pop=16, gen=18, mutation_prob=0.10, elitism=2, evolution_steps=500 steps/candidate.
+
+Post-evolution: top-K Pareto-front candidates trained to convergence (20 K steps).
+
+---
+
+### 2.3 Existing TS Structures — DMamba, S-Mamba, iTransformer
+
+All three share the same external interface: input `(B, L, C)` → output `(B, H, C)`.
+What differs is **how tokens are formed** and **how many backbones are used**.
+
+#### DMamba (Decomposition + Dual Temporal Flow)
+
+```
+(B, L, C)  →  RevIN  →  EMA decomposition
+                              │                    │
+                         Seasonal              Trend
+                       embed (C→D)          embed (C→D)
+                              │                    │
+                    backbone_seasonal      backbone_trend
+                    (L tokens, causal)    (L tokens, causal)
+                              │                    │
+                       proj (D→C)           proj (D→C)
+                       temporal (L→H)       temporal (L→H)
+                              └──────── + ──────────┘
+                                        │
+                                   RevIN denorm
+                                        │
+                                   (B, H, C)
+```
+
+- Backbone processes **L temporal tokens** — causal (past cannot see future)
+- Genome split: first N/2 layers → seasonal backbone, last N/2 → trend backbone
+- Original operators: seasonal=Mamba, trend=MLP
+
+#### S-Mamba (Two-Stage Variate-First)
+
+```
+(B, L, C)  →  transpose  →  (B, C, L)
+                  │
+           variate_embed (L→D)     → (B, C, D)
+                  │
+         backbone_variate            ← stage 1: inter-variate correlation
+         (C tokens, bidirectional)
+                  │
+         backbone_temporal           ← stage 2: temporal dependency
+         (C tokens, bidirectional)
+                  │
+          proj (D→H)  →  transpose  →  (B, H, C)
+```
+
+- Backbone processes **C variate tokens** — bidirectional
+- Genome split: first N/2 → variate backbone, last N/2 → temporal backbone
+- Original operators: variate=BiMamba, temporal=FFN
+
+#### iTransformer (Single Variate-First Backbone)
+
+```
+(B, L, C)  →  transpose  →  (B, C, L)
+                  │
+           variate_embed (L→D)     → (B, C, D)
+                  │
+             backbone
+         (C tokens, bidirectional)   ← N stacked blocks, each: cross-variate + per-variate
+                  │
+          proj (D→H)  →  transpose  →  (B, H, C)
+```
+
+- Same variate-first orientation as S-Mamba but **single backbone**, no stage split
+- Full genome → one backbone
+- Original operators: cross-variate=Attention, per-variate=FFN
+
+**Key differences summary:**
+
+| | DMamba | S-Mamba | iTransformer |
+|---|---|---|---|
+| Token type | Temporal (L tokens) | Variate (C tokens) | Variate (C tokens) |
+| Backbones | 2 (seasonal + trend) | 2 (variate + temporal) | 1 |
+| Causality | Causal | Bidirectional | Bidirectional |
+| Decomposition | EMA + RevIN | None | None |
+| Genome split | First/last half | First/last half | Full genome |
+
+---
+
+### 2.4 TiDAR-TS — Think-in-Diffusion for Time Series
+
+TiDAR-TS adapts the LM TiDAR framework to continuous-valued forecasting. The key idea is to **draft all H forecast steps in parallel** (bidirectional/diffusion) and optionally **refine autoregressively**.
+
+**Sequence layout** — a single forward pass processes `L + H` tokens:
+
+```
+Position:  0 ──────── L-1  |  L ──────────── L+H-1
+Token:     [x_1 ... x_L]   |  [MASK ... MASK]
+Attention: causal           |  full (sees all lookback + all mask tokens)
+```
+
+The `TIDAR_HYBRID` sparsity mask enforces this pattern on every LIV block.
+
+**Training — joint loss:**
+
+```
+L = 1/(1+α) · [α · L_AR  +  L_Diff]
+
+L_AR   = MSE(ar_head(clean_out[:, :-1]),  x[:, 1:])   ← next-step on lookback
+L_Diff = MSE(diff_head(mask_out),         y)            ← forecast from mask
+```
+
+**Inference modes:**
+
+| Mode | How | Speed |
+|---|---|---|
+| Draft (fast) | `diff_head(mask_out)` — single forward pass | O(1) |
+| AR-refined (k steps) | Slide window, replace first k draft steps with `ar_head` output | O(k) |
+| Full AR (slow) | k = H, all steps refined | O(H) |
+
+Unlike LM TiDAR (discrete tokens, cross-entropy), TiDAR-TS uses **MSE** on continuous values. There is no accept/reject step — the AR refinement simply overwrites draft positions with the AR head's prediction.
+
+---
+
+## 3. Core Idea
 
 Use STAR's evolutionary search (NSGA-2) to search over LIV operators within established time series forecasting structures. Instead of manually choosing "Mamba for X, MLP for Y", let the genome decide.
 
@@ -37,7 +336,7 @@ For each component slot, the GA searches over:
 
 ---
 
-## 3. Structural Approaches to Compare
+## 4. Structural Approaches to Compare
 
 We define **4 structural templates**, each inspired by a SOTA model. Within each template, the LIV-GA searches for the best operator combination.
 
@@ -185,7 +484,7 @@ Output (B, H, C)
 
 ---
 
-## 4. CfC as New LIV Class
+## 5. CfC as New LIV Class
 
 CfC (Closed-form Continuous-time) is a natural addition to the LIV operator pool. It comes from the same Liquid AI group that created LIV.
 
@@ -218,7 +517,7 @@ CfC operator:
 
 ---
 
-## 5. TiDAR Integration (Parallel Prediction)
+## 6. TiDAR Integration (Parallel Prediction)
 
 Adapt TiDAR's "Think in Diffusion, Talk in Autoregression" for time series:
 
@@ -253,7 +552,7 @@ For forecast horizon H, lookback L:
 
 ---
 
-## 6. NSGA-2 Multi-Objective Search
+## 7. NSGA-2 Multi-Objective Search
 
 ### Objectives
 1. **Primary**: Forecasting quality (MSE on validation set)
@@ -306,7 +605,7 @@ genome_D = {
 
 ---
 
-## 7. Experimental Plan
+## 8. Experimental Plan
 
 ### Datasets
 
@@ -364,7 +663,7 @@ genome_D = {
 
 ---
 
-## 8. Implementation Plan
+## 9. Implementation Plan
 
 ### Phase 1: Data Pipeline (Week 1)
 - [ ] Download datasets via `download_data.sh`
@@ -403,7 +702,7 @@ genome_D = {
 
 ---
 
-## 9. Compute Requirements
+## 10. Compute Requirements
 
 ### Per Architecture Search (1 dataset, 1 approach)
 - Population 16 × Generations 12 = 192 candidate evaluations
@@ -419,7 +718,7 @@ genome_D = {
 
 ---
 
-## 10. Expected Contributions
+## 11. Expected Contributions
 
 1. **LIV-TS Framework**: First application of LIV evolutionary search to time series forecasting
 2. **CfC as LIV operator**: Extending the LIV option pool with continuous-time dynamics

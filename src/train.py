@@ -16,6 +16,7 @@ Modes:
   Detection:       detect-evolve / detect-train / detect-both
   TiDAR:           tidar-evolve / tidar-train / tidar-both
   Time series:     ts-evolve / ts-train / ts-both
+  TiDAR-TS:        ts-tidar-evolve / ts-tidar-train / ts-tidar-both
 
 Usage:
     python -m src.train evolve --synthetic
@@ -52,7 +53,15 @@ from core.nsga import (
     DEFAULT_ELITISM, DEFAULT_CROSSOVER_POINTS, DEFAULT_TOURNAMENT_K,
 )
 
-from core.tidar import TiDARConfig, TiDARModel, compute_tidar_loss
+from core.tidar import (
+    TiDARConfig, TiDARModel, compute_tidar_loss,
+    TiDARTSConfig, TiDARTSModel, compute_tidar_ts_loss,
+)
+from core.liv import SparsityType
+from core.modeldef import (
+    RMSNorm, STARLanguageModel, STARVisionModel, STARVisionDetector,
+    RevIN, EMADecomposition, STARLIVTSModel,
+)
 from src.dataload import get_dataloader, get_dataset_info
 
 logging.basicConfig(
@@ -62,389 +71,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-
-# ============================================================================
-# Language Model Wrapper
-# ============================================================================
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
-
-
-class STARLanguageModel(nn.Module):
-    """Causal LM: embedding -> LIV backbone -> RMSNorm -> LM head (tied)."""
-
-    def __init__(self, backbone, vocab_size, dim, tie_weights=True):
-        super().__init__()
-        self.embed = nn.Embedding(vocab_size, dim)
-        self.backbone = backbone
-        self.norm = RMSNorm(dim)
-        self.head = nn.Linear(dim, vocab_size, bias=False)
-        if tie_weights:
-            self.head.weight = self.embed.weight
-        nn.init.normal_(self.embed.weight, std=0.02)
-
-    def forward(self, idx, targets=None):
-        x = self.backbone(self.embed(idx))
-        logits = self.head(self.norm(x))
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        return logits, loss
-
-
-class STARVisionModel(nn.Module):
-    """Vision model: patch_embed -> LIV backbone (causal=False) -> pool -> head."""
-
-    def __init__(self, backbone, num_classes, dim,
-                 img_size=32, patch_size=4, in_channels=3):
-        super().__init__()
-        assert img_size % patch_size == 0
-        self.num_patches = (img_size // patch_size) ** 2
-
-        self.patch_embed = nn.Conv2d(
-            in_channels, dim, kernel_size=patch_size, stride=patch_size,
-        )
-        self.pos_embed = nn.Parameter(
-            torch.randn(1, self.num_patches, dim) * 0.02
-        )
-        self.backbone = backbone
-        self.norm = RMSNorm(dim)
-        self.head = nn.Linear(dim, num_classes)
-
-        nn.init.normal_(self.patch_embed.weight, std=0.02)
-        nn.init.zeros_(self.patch_embed.bias)
-
-    def forward(self, imgs, targets=None):
-        x = self.patch_embed(imgs).flatten(2).transpose(1, 2)
-        x = x + self.pos_embed
-        x = self.backbone(x)
-        x = x.mean(dim=1)
-        logits = self.head(self.norm(x))
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits, targets)
-        return logits, loss
-
-
-# ============================================================================
-# Object Detection: Utilities & Model
-# ============================================================================
-
-VOC_CLASSES = [
-    'aeroplane', 'bicycle', 'bird', 'boat', 'bottle',
-    'bus', 'car', 'cat', 'chair', 'cow',
-    'diningtable', 'dog', 'horse', 'motorbike', 'person',
-    'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor',
-]
-
-
-def _cxcywh_to_xyxy(boxes):
-    """Convert (cx, cy, w, h) -> (x1, y1, x2, y2)."""
-    cx, cy, w, h = boxes.unbind(-1)
-    return torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
-
-
-def _sigmoid_focal_loss(logits, targets, alpha=0.25, gamma=2.0):
-    """Binary focal loss for objectness."""
-    p = torch.sigmoid(logits)
-    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-    p_t = p * targets + (1 - p) * (1 - targets)
-    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
-    return (alpha_t * ((1 - p_t) ** gamma) * ce).mean()
-
-
-def _box_giou_paired(pred, target):
-    """GIoU for matched box pairs, both in cxcywh normalized [0,1]."""
-    p = _cxcywh_to_xyxy(pred)
-    t = _cxcywh_to_xyxy(target)
-    inter_x1 = torch.max(p[:, 0], t[:, 0])
-    inter_y1 = torch.max(p[:, 1], t[:, 1])
-    inter_x2 = torch.min(p[:, 2], t[:, 2])
-    inter_y2 = torch.min(p[:, 3], t[:, 3])
-    inter = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
-    area_p = (p[:, 2] - p[:, 0]).clamp(min=0) * (p[:, 3] - p[:, 1]).clamp(min=0)
-    area_t = (t[:, 2] - t[:, 0]).clamp(min=0) * (t[:, 3] - t[:, 1]).clamp(min=0)
-    union = area_p + area_t - inter
-    iou = inter / (union + 1e-7)
-    enc_x1 = torch.min(p[:, 0], t[:, 0])
-    enc_y1 = torch.min(p[:, 1], t[:, 1])
-    enc_x2 = torch.max(p[:, 2], t[:, 2])
-    enc_y2 = torch.max(p[:, 3], t[:, 3])
-    enc_area = (enc_x2 - enc_x1).clamp(min=0) * (enc_y2 - enc_y1).clamp(min=0)
-    return iou - (enc_area - union) / (enc_area + 1e-7)
-
-
-class STARVisionDetector(nn.Module):
-    """Object detection: patch_embed -> LIV backbone (causal=False) -> detection heads."""
-
-    def __init__(self, backbone, num_classes, dim,
-                 img_size=224, patch_size=16, in_channels=3):
-        super().__init__()
-        assert img_size % patch_size == 0
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.num_classes = num_classes
-        self.grid_size = img_size // patch_size
-        self.num_patches = self.grid_size ** 2
-
-        self.patch_embed = nn.Conv2d(
-            in_channels, dim, kernel_size=patch_size, stride=patch_size,
-        )
-        self.pos_embed = nn.Parameter(
-            torch.randn(1, self.num_patches, dim) * 0.02
-        )
-        self.backbone = backbone
-        self.norm = RMSNorm(dim)
-
-        self.cls_head = nn.Sequential(
-            nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, num_classes),
-        )
-        self.obj_head = nn.Sequential(
-            nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, 1),
-        )
-        self.bbox_head = nn.Sequential(
-            nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, 4),
-        )
-
-        nn.init.normal_(self.patch_embed.weight, std=0.02)
-        nn.init.zeros_(self.patch_embed.bias)
-
-    def forward(self, imgs, targets=None):
-        B = imgs.size(0)
-        x = self.patch_embed(imgs).flatten(2).transpose(1, 2)
-        x = x + self.pos_embed
-        x = self.backbone(x)
-        x = self.norm(x)
-
-        cls_logits = self.cls_head(x)
-        obj_logits = self.obj_head(x).squeeze(-1)
-        bbox_pred = self.bbox_head(x).sigmoid()
-
-        loss = None
-        if targets is not None:
-            loss = self._compute_loss(cls_logits, obj_logits, bbox_pred, targets)
-        return (cls_logits, obj_logits, bbox_pred), loss
-
-    def _compute_loss(self, cls_logits, obj_logits, bbox_pred, targets):
-        B = cls_logits.size(0)
-        device = cls_logits.device
-        total_loss = torch.zeros(1, device=device, dtype=cls_logits.dtype)
-
-        for b in range(B):
-            boxes = targets[b]['boxes']
-            labels = targets[b]['labels']
-            obj_target = torch.zeros(self.num_patches, device=device)
-
-            if len(boxes) > 0:
-                cx, cy = boxes[:, 0], boxes[:, 1]
-                gx = (cx * self.grid_size).long().clamp(0, self.grid_size - 1)
-                gy = (cy * self.grid_size).long().clamp(0, self.grid_size - 1)
-                patch_idx = gy * self.grid_size + gx
-
-                uniq, inv = torch.unique(patch_idx, return_inverse=True)
-                a_boxes = torch.zeros(len(uniq), 4, device=device)
-                a_labels = torch.zeros(len(uniq), dtype=torch.long, device=device)
-                for i in range(len(patch_idx)):
-                    a_boxes[inv[i]] = boxes[i]
-                    a_labels[inv[i]] = labels[i]
-
-                obj_target[uniq] = 1.0
-
-                pred_b = bbox_pred[b, uniq]
-                l1 = F.l1_loss(pred_b, a_boxes, reduction='mean')
-                giou = 1.0 - _box_giou_paired(pred_b, a_boxes).mean()
-
-                cls_loss = F.cross_entropy(cls_logits[b, uniq], a_labels)
-
-                total_loss = total_loss + cls_loss + l1 * 5.0 + giou * 2.0
-
-            total_loss = total_loss + _sigmoid_focal_loss(obj_logits[b], obj_target)
-
-        return total_loss / B
-
-
-# ============================================================================
-# Time Series Forecasting Model
-# ============================================================================
-
-class RevIN(nn.Module):
-    """Reversible Instance Normalization (Kim et al., 2022)."""
-
-    def __init__(self, num_features, eps=1e-5, affine=True):
-        super().__init__()
-        self.num_features = num_features
-        self.eps = eps
-        self.affine = affine
-        if affine:
-            self.affine_weight = nn.Parameter(torch.ones(num_features))
-            self.affine_bias = nn.Parameter(torch.zeros(num_features))
-
-    def forward(self, x, mode='norm'):
-        """x: (B, L, C)"""
-        if mode == 'norm':
-            self._mean = x.mean(dim=1, keepdim=True).detach()
-            self._stdev = (x.var(dim=1, keepdim=True, unbiased=False) + self.eps).sqrt().detach()
-            x = (x - self._mean) / self._stdev
-            if self.affine:
-                x = x * self.affine_weight + self.affine_bias
-            return x
-        elif mode == 'denorm':
-            if self.affine:
-                x = (x - self.affine_bias) / (self.affine_weight + self.eps)
-            x = x * self._stdev + self._mean
-            return x
-
-
-class EMADecomposition(nn.Module):
-    """EMA-based trend-seasonal decomposition (DMamba-style).
-
-    Learnable per-channel smoothing factor alpha decomposed into
-    trend (low-freq EMA) and seasonal (residual) components.
-    """
-
-    def __init__(self, n_variates):
-        super().__init__()
-        self.alpha = nn.Parameter(torch.full((n_variates,), 0.5))
-
-    def forward(self, x):
-        """x: (B, L, C) → (seasonal, trend) each (B, L, C)"""
-        alpha = torch.sigmoid(self.alpha)  # (C,) in [0,1]
-        B, L, C = x.shape
-        trend = torch.zeros_like(x)
-        trend[:, 0] = x[:, 0]
-        for t in range(1, L):
-            trend[:, t] = alpha * trend[:, t - 1] + (1 - alpha) * x[:, t]
-        seasonal = x - trend
-        return seasonal, trend
-
-
-class STARLIVTSModel(nn.Module):
-    """Time series forecasting with LIV backbone.
-
-    Structural approaches:
-      'dmamba':       Decomposition + dual LIV flow (seasonal + trend)
-      'smamba':       Variate-first tokenization + LIV backbone
-      'itransformer': Inverted variate tokens + N LIV blocks
-
-    Data flow:
-      dmamba:         (B,L,C) → RevIN → EMA decomp
-                        seasonal: embed(C→D) → backbone → proj(D→C) → temporal(L→H)
-                        trend:    embed(C→D) → backbone → proj(D→C) → temporal(L→H)
-                        sum → RevIN denorm → (B,H,C)
-      smamba/itrans:  (B,L,C) → (B,C,L) → embed(L→D) → backbone(C tokens) → proj(D→H) → (B,H,C)
-
-    Args:
-        backbone:       Main LIV backbone (for seasonal in dmamba, sole backbone in smamba/itrans)
-        n_variates:     Number of input variates (C)
-        seq_len:        Lookback window length (L)
-        pred_len:       Forecast horizon length (H)
-        dim:            Model hidden dimension (D)
-        structure:      'dmamba', 'smamba', or 'itransformer'
-        backbone_trend: Separate backbone for trend path (dmamba only, shared if None)
-    """
-
-    def __init__(self, backbone, n_variates, seq_len, pred_len, dim,
-                 structure='itransformer', backbone_trend=None):
-        super().__init__()
-        self.structure = structure
-        self.n_variates = n_variates
-        self.seq_len = seq_len
-        self.pred_len = pred_len
-        self.dim = dim
-
-        if structure == 'dmamba':
-            self.revin = RevIN(n_variates)
-            self.decomp = EMADecomposition(n_variates)
-            # Seasonal path
-            self.seasonal_embed = nn.Linear(n_variates, dim)
-            self.seasonal_backbone = backbone
-            self.seasonal_proj = nn.Linear(dim, n_variates)
-            self.seasonal_temporal = nn.Linear(seq_len, pred_len)
-            # Trend path
-            self.trend_embed = nn.Linear(n_variates, dim)
-            if backbone_trend is not None:
-                self.trend_backbone = backbone_trend
-            else:
-                self.trend_backbone = backbone
-            self.trend_proj = nn.Linear(dim, n_variates)
-            self.trend_temporal = nn.Linear(seq_len, pred_len)
-
-        elif structure in ('smamba', 'itransformer'):
-            # Variate embedding: each variate's L timepoints → D-dim token
-            self.variate_embed = nn.Linear(seq_len, dim)
-            self.backbone = backbone
-            self.variate_proj = nn.Linear(dim, pred_len)
-
-        else:
-            raise ValueError(f"Unknown structure: {structure}")
-
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in (self.modules()):
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def forward(self, x):
-        """
-        Args:  x: (B, seq_len, C) lookback window
-        Returns: pred: (B, pred_len, C) forecast
-        """
-        if self.structure == 'dmamba':
-            return self._forward_dmamba(x)
-        else:
-            return self._forward_inverted(x)
-
-    def _forward_dmamba(self, x):
-        """Approach A: Decomposition + dual flow."""
-        # RevIN normalize
-        x = self.revin(x, mode='norm')
-        # Decompose
-        seasonal, trend = self.decomp(x)
-
-        # Seasonal path: (B,L,C) → embed → backbone → proj → temporal
-        s = self.seasonal_embed(seasonal)       # (B, L, D)
-        s = self.seasonal_backbone(s)           # (B, L, D)
-        s = self.seasonal_proj(s)               # (B, L, C)
-        s = s.transpose(1, 2)                   # (B, C, L)
-        s = self.seasonal_temporal(s)           # (B, C, H)
-        s = s.transpose(1, 2)                   # (B, H, C)
-
-        # Trend path: (B,L,C) → embed → backbone → proj → temporal
-        t = self.trend_embed(trend)             # (B, L, D)
-        t = self.trend_backbone(t)              # (B, L, D)
-        t = self.trend_proj(t)                  # (B, L, C)
-        t = t.transpose(1, 2)                   # (B, C, L)
-        t = self.trend_temporal(t)              # (B, C, H)
-        t = t.transpose(1, 2)                   # (B, H, C)
-
-        # Aggregate + denormalize
-        out = s + t
-        out = self.revin(out, mode='denorm')
-        return out
-
-    def _forward_inverted(self, x):
-        """Approach B/C: Inverted variate tokens."""
-        # (B, L, C) → (B, C, L) — each variate becomes a token
-        x = x.transpose(1, 2)
-        # Embed: (B, C, L) → (B, C, D)
-        x = self.variate_embed(x)
-        # Backbone: processes C variate tokens
-        x = self.backbone(x)                    # (B, C, D)
-        # Project: (B, C, D) → (B, C, H)
-        x = self.variate_proj(x)
-        # (B, C, H) → (B, H, C)
-        x = x.transpose(1, 2)
-        return x
 
 
 # ============================================================================
@@ -977,12 +603,68 @@ def _build_tidar_from_backbone(backbone, args):
     return TiDARModel(cfg, backbone=backbone)
 
 
-def _build_ts_from_backbone(backbone, args, backbone_trend=None):
-    """Wrap a genome-built backbone in STARLIVTSModel."""
+def _build_ts_model(genome, class_pool, args):
+    """Build STARLIVTSModel from a genome, splitting it for dual-backbone structures.
+
+    Genome splitting strategy:
+      dmamba:        first half → seasonal backbone (causal),
+                     second half → trend backbone (causal)
+      smamba:        first half → variate-correlation backbone (bidirectional),
+                     second half → temporal-processing backbone (bidirectional)
+      itransformer:  full genome → single backbone (bidirectional)
+    """
+    structure = args.ts_structure
+    n = len(genome.layers)
+    mid = n // 2
+
+    if structure == 'dmamba':
+        builder = GenomeModelBuilder(class_pool, args.dim, causal=True)
+        g1, g2 = Genome(genome.layers[:mid]), Genome(genome.layers[mid:])
+        repair(g1, class_pool)
+        repair(g2, class_pool)
+        backbone     = builder.build(g1)
+        backbone_aux = builder.build(g2)
+    elif structure == 'smamba':
+        builder = GenomeModelBuilder(class_pool, args.dim, causal=False)
+        g1, g2 = Genome(genome.layers[:mid]), Genome(genome.layers[mid:])
+        repair(g1, class_pool)
+        repair(g2, class_pool)
+        backbone     = builder.build(g1)
+        backbone_aux = builder.build(g2)
+    else:  # itransformer
+        builder = GenomeModelBuilder(class_pool, args.dim, causal=False)
+        backbone     = builder.build(genome)
+        backbone_aux = None
+
     return STARLIVTSModel(
         backbone, args.n_variates, args.ts_seq_len, args.ts_pred_len,
-        args.dim, structure=args.ts_structure, backbone_trend=backbone_trend,
+        args.dim, structure=structure, backbone_aux=backbone_aux,
     )
+
+
+def _build_tidar_ts_model(genome, class_pool, args):
+    """Build TiDARTSModel from a genome.
+
+    Uses the full genome as a single backbone (no splitting).
+    Each LIV block gets TIDAR_HYBRID sparsity so the lookback section
+    attends causally and the forecast mask section attends bidirectionally.
+    """
+    builder = GenomeModelBuilder(
+        class_pool, args.dim,
+        causal=False,                              # sparsity mask handles causality
+        sparsity_type=SparsityType.TIDAR_HYBRID,   # passed to every UnifiedLIV
+    )
+    backbone = builder.build(genome)
+
+    cfg = TiDARTSConfig(
+        n_variates=args.n_variates,
+        seq_len=args.ts_seq_len,
+        pred_len=args.ts_pred_len,
+        dim=args.dim,
+        num_heads=getattr(args, 'num_heads', 8),
+        alpha=getattr(args, 'tidar_alpha', 1.0),
+    )
+    return TiDARTSModel(cfg, backbone=backbone)
 
 
 # ============================================================================
@@ -1067,6 +749,145 @@ def evaluate_ts(model, dataloader, args):
     mse = total_mse / max(n, 1)
     mae = total_mae / max(n, 1)
     return mse, mae
+
+
+# ============================================================================
+# Training & Evaluation — TiDAR-TS
+# ============================================================================
+
+def train_tidar_ts_model(model, train_loader, val_loader, args, steps=None, prefix=""):
+    """Train TiDARTSModel with joint AR + Diffusion loss. Returns validation MSE."""
+    device = args.device
+    model = model.to(device)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr,
+        betas=(args.beta1, args.beta2), weight_decay=args.weight_decay,
+    )
+
+    use_amp = args.amp and device != "cpu"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    total_steps = steps or getattr(args, 'train_steps', 10000)
+    log_every = max(1, total_steps // 20)
+
+    model.train()
+    run_total = run_ar = run_diff = 0.0
+    step = 0
+
+    while step < total_steps:
+        for batch_x, batch_y in train_loader:
+            if step >= total_steps:
+                break
+
+            lr = get_lr(step, args.warmup_steps, total_steps, args.lr)
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
+
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
+
+            optimizer.zero_grad()
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                loss, ar_l, diff_l = compute_tidar_ts_loss(model, batch_x, batch_y)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+
+            run_total += loss.item()
+            run_ar    += ar_l
+            run_diff  += diff_l
+            step += 1
+
+            if step % log_every == 0:
+                log.info(
+                    f"{prefix}step {step}/{total_steps}  lr={lr:.2e}  "
+                    f"loss={run_total/log_every:.4f}  "
+                    f"ar={run_ar/log_every:.4f}  diff={run_diff/log_every:.4f}"
+                )
+                run_total = run_ar = run_diff = 0.0
+
+    val_mse, val_mae = evaluate_tidar_ts(model, val_loader, args)
+    log.info(f"{prefix}val MSE={val_mse:.6f}  MAE={val_mae:.6f}")
+    model.cpu()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return val_mse
+
+
+@torch.no_grad()
+def evaluate_tidar_ts(model, dataloader, args):
+    """Evaluate TiDARTSModel using draft (diff_head) forecast. Returns (MSE, MAE)."""
+    device = next(model.parameters()).device
+    model.eval()
+
+    total_mse, total_mae, n = 0.0, 0.0, 0
+    for batch_x, batch_y in dataloader:
+        batch_x = batch_x.to(device)
+        batch_y = batch_y.to(device)
+        with torch.amp.autocast("cuda", enabled=args.amp and str(device) != "cpu"):
+            pred = model.forecast(batch_x, ar_steps=0)   # fast draft mode
+        total_mse += F.mse_loss(pred, batch_y, reduction='sum').item()
+        total_mae += F.l1_loss(pred, batch_y, reduction='sum').item()
+        n += batch_y.numel()
+
+    model.train()
+    return total_mse / max(n, 1), total_mae / max(n, 1)
+
+
+def post_tidar_ts_train(population, class_pool, train_loader, val_loader,
+                        test_loader, args):
+    """Select top-K Pareto-optimal genomes and train TiDAR-TS models to convergence."""
+    candidates = sorted(
+        [ind for ind in population if ind.rank == 0],
+        key=lambda ind: ind.fitness.quality,
+    )[:args.top_k]
+    if not candidates:
+        candidates = sorted(population, key=lambda ind: ind.fitness.quality)[:args.top_k]
+
+    log.info(f"\n{'='*60}\nPost-evolution TiDAR-TS: "
+             f"training {len(candidates)} candidates\n{'='*60}")
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+
+    for i, ind in enumerate(candidates):
+        log.info(f"\n--- Candidate {i+1}/{len(candidates)} ---")
+        log.info(f"Evolution quality={ind.fitness.quality:.6f}  params={ind.fitness.param_count:,}")
+        classes = [g.liv_class for g in ind.genome.layers]
+        log.info(f"Layer classes: {classes}")
+
+        ts_model = _build_tidar_ts_model(ind.genome, class_pool, args)
+        log.info(f"Total params: {count_params(ts_model):,}")
+
+        val_mse = train_tidar_ts_model(ts_model, train_loader, val_loader, args,
+                                       steps=args.full_train_steps,
+                                       prefix=f"[C{i+1}] ")
+        log.info(f"Candidate {i+1} val MSE: {val_mse:.6f}")
+
+        test_mse, test_mae = evaluate_tidar_ts(ts_model.to(args.device), test_loader, args)
+        log.info(f"Candidate {i+1} test MSE: {test_mse:.6f}  MAE: {test_mae:.6f}")
+        results.append((ind, val_mse, test_mse, test_mae))
+
+        torch.save({
+            "genome": ind.genome.flatten(),
+            "layer_classes": classes,
+            "model_state_dict": ts_model.state_dict(),
+            "val_mse": val_mse,
+            "test_mse": test_mse,
+            "test_mae": test_mae,
+            "dataset": args.ts_dataset,
+        }, out_dir / f"tidar_ts_candidate_{i+1}.pt")
+
+    results.sort(key=lambda x: x[2])   # sort by test MSE
+    log.info(f"\n{'='*60}\nFinal TiDAR-TS results (sorted by test MSE):")
+    for rank, (ind, vl, tm, tma) in enumerate(results):
+        log.info(f"  #{rank+1}  val={vl:.6f}  test_mse={tm:.6f}  "
+                 f"test_mae={tma:.6f}  params={ind.fitness.param_count:,}")
+    log.info("=" * 60)
+    return results
 
 
 # ============================================================================
@@ -1377,8 +1198,6 @@ def post_ts_train(population, class_pool, train_loader, val_loader, test_loader,
 
     log.info(f"\n{'='*60}\nPost-evolution TS: "
              f"training {len(candidates)} candidates\n{'='*60}")
-    causal = (args.ts_structure == 'dmamba')
-    builder = GenomeModelBuilder(class_pool, args.dim, causal=causal)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
@@ -1389,8 +1208,7 @@ def post_ts_train(population, class_pool, train_loader, val_loader, test_loader,
         classes = [g.liv_class for g in ind.genome.layers]
         log.info(f"Layer classes: {classes}")
 
-        backbone = builder.build(ind.genome)
-        ts_model = _build_ts_from_backbone(backbone, args)
+        ts_model = _build_ts_model(ind.genome, class_pool, args)
         log.info(f"Total params: {count_params(ts_model):,}")
 
         val_mse = train_ts_model(ts_model, train_loader, val_loader, args,
@@ -1491,21 +1309,43 @@ def _make_tidar_quality_fn(args, train_data, val_data):
     return quality_fn
 
 
-def _make_ts_quality_fn(args, train_loader, val_loader):
-    """Quality function for TS NSGA: wraps backbone in STARLIVTSModel."""
+def _make_ts_quality_fn(args, train_loader, val_loader, class_pool):
+    """Quality function for TS NSGA: builds STARLIVTSModel via genome splitting."""
     if getattr(args, "dry_run", False):
         return None
     evo_steps = getattr(args, "evolution_steps", 500)
     counter = [0]
 
     def quality_fn(backbone, genome):
+        # backbone arg is ignored; we rebuild from genome to support splitting
         counter[0] += 1
-        ts_model = _build_ts_from_backbone(backbone, args)
+        ts_model = _build_ts_model(genome, class_pool, args)
         n = count_params(ts_model)
         log.info(f"[TS-Eval #{counter[0]}] {n:,} params, {evo_steps} steps")
         val_mse = train_ts_model(ts_model, train_loader, val_loader, args,
                                  steps=evo_steps, prefix=f"[TSE{counter[0]}] ")
         log.info(f"[TS-Eval #{counter[0]}] MSE={val_mse:.6f}")
+        return val_mse
+
+    return quality_fn
+
+
+def _make_tidar_ts_quality_fn(args, train_loader, val_loader, class_pool):
+    """Quality function for TiDAR-TS NSGA: builds TiDARTSModel from full genome."""
+    if getattr(args, "dry_run", False):
+        return None
+    evo_steps = getattr(args, "evolution_steps", 500)
+    counter = [0]
+
+    def quality_fn(backbone, genome):
+        # backbone arg is ignored; we rebuild from genome with TIDAR_HYBRID sparsity
+        counter[0] += 1
+        ts_model = _build_tidar_ts_model(genome, class_pool, args)
+        n = count_params(ts_model)
+        log.info(f"[TiDAR-TS-Eval #{counter[0]}] {n:,} params, {evo_steps} steps")
+        val_mse = train_tidar_ts_model(ts_model, train_loader, val_loader, args,
+                                       steps=evo_steps, prefix=f"[TTSE{counter[0]}] ")
+        log.info(f"[TiDAR-TS-Eval #{counter[0]}] MSE={val_mse:.6f}")
         return val_mse
 
     return quality_fn
@@ -1712,6 +1552,26 @@ def build_parser():
     tsbp.add_argument("--full_train_steps", type=int, default=10_000)
     tsbp.add_argument("--top_k", type=int, default=8)
 
+    # --- TiDAR-TS: ts-tidar-evolve ---
+    ttep = sub.add_parser("ts-tidar-evolve", parents=[shared, ts_shared, tidar_shared],
+                          help="NSGA-II architecture search for TiDAR-TS")
+    _add_evolution_args(ttep)
+    ttep.set_defaults(evolution_steps=500)
+
+    # --- TiDAR-TS: ts-tidar-train ---
+    tttp = sub.add_parser("ts-tidar-train", parents=[shared, ts_shared, tidar_shared],
+                          help="Train a specific genome with TiDAR-TS objective")
+    tttp.add_argument("--genome_path", type=str, required=True)
+    tttp.add_argument("--train_steps", type=int, default=10_000)
+
+    # --- TiDAR-TS: ts-tidar-both ---
+    ttbp = sub.add_parser("ts-tidar-both", parents=[shared, ts_shared, tidar_shared],
+                          help="Evolve + train top-K with TiDAR-TS objective")
+    _add_evolution_args(ttbp)
+    ttbp.set_defaults(evolution_steps=500)
+    ttbp.add_argument("--full_train_steps", type=int, default=10_000)
+    ttbp.add_argument("--top_k", type=int, default=8)
+
     return p
 
 
@@ -1860,9 +1720,11 @@ def main():
         else:
             args.seq_len = args.n_variates
 
+        pool = build_class_pool(getattr(args, "include_extended", False))
+
         if args.mode == "ts-evolve":
-            qfn = _make_ts_quality_fn(args, train_loader, val_loader)
-            population, pool = evolve_with_seeds(
+            qfn = _make_ts_quality_fn(args, train_loader, val_loader, pool)
+            population, _ = evolve_with_seeds(
                 args, qfn, _get_seeds(args), causal=causal)
 
             pf = [p for p in population if p.rank == 0]
@@ -1874,9 +1736,7 @@ def main():
 
         elif args.mode == "ts-train":
             genome = load_genome(args.genome_path, args.num_layers)
-            pool = build_class_pool()
-            backbone = GenomeModelBuilder(pool, args.dim, causal=causal).build(genome)
-            ts_model = _build_ts_from_backbone(backbone, args)
+            ts_model = _build_ts_model(genome, pool, args)
             log.info(f"TS params: {count_params(ts_model):,}")
 
             val_mse = train_ts_model(
@@ -1901,11 +1761,80 @@ def main():
             }, out / "trained_ts.pt")
 
         elif args.mode == "ts-both":
-            qfn = _make_ts_quality_fn(args, train_loader, val_loader)
-            population, pool = evolve_with_seeds(
+            qfn = _make_ts_quality_fn(args, train_loader, val_loader, pool)
+            population, _ = evolve_with_seeds(
                 args, qfn, _get_seeds(args), causal=causal)
             post_ts_train(population, pool, train_loader, val_loader,
                           test_loader, args)
+
+        return
+
+    # ── TiDAR-TS modes ──
+    if args.mode.startswith("ts-tidar-"):
+        info = get_dataset_info(args.ts_dataset)
+        if not info.get("exists"):
+            raise FileNotFoundError(
+                f"Dataset '{args.ts_dataset}' not found. Run ./download_data.sh")
+        args.n_variates = info["n_variates"]
+        log.info(f"TiDAR-TS dataset: {args.ts_dataset}  variates={args.n_variates}  "
+                 f"seq={args.ts_seq_len}  pred={args.ts_pred_len}  "
+                 f"alpha={getattr(args, 'tidar_alpha', 1.0)}")
+
+        train_loader, val_loader, test_loader, _ = get_dataloader(
+            dataset=args.ts_dataset,
+            seq_len=args.ts_seq_len,
+            pred_len=args.ts_pred_len,
+            batch_size=args.ts_batch_size,
+            num_workers=args.ts_num_workers,
+        )
+
+        pool = build_class_pool(getattr(args, "include_extended", False))
+        # Backbone processes L+H tokens total; use seq_len for KV-cache estimate
+        args.seq_len = args.ts_seq_len + args.ts_pred_len
+
+        if args.mode == "ts-tidar-evolve":
+            qfn = _make_tidar_ts_quality_fn(args, train_loader, val_loader, pool)
+            population, _ = evolve_with_seeds(
+                args, qfn, _get_seeds(args), causal=False)
+
+            pf = [p for p in population if p.rank == 0]
+            log.info(f"\nTiDAR-TS evolution complete. Pareto front: {len(pf)}")
+            for i, ind in enumerate(pf):
+                cls = [g.liv_class for g in ind.genome.layers]
+                log.info(f"  [{i}] q={ind.fitness.quality:.6f} "
+                         f"p={ind.fitness.param_count:,}  classes={cls}")
+
+        elif args.mode == "ts-tidar-train":
+            genome = load_genome(args.genome_path, args.num_layers)
+            ts_model = _build_tidar_ts_model(genome, pool, args)
+            log.info(f"TiDAR-TS params: {count_params(ts_model):,}")
+
+            val_mse = train_tidar_ts_model(
+                ts_model, train_loader, val_loader, args, steps=args.train_steps)
+
+            test_mse, test_mae = evaluate_tidar_ts(
+                ts_model.to(args.device), test_loader, args)
+            log.info(f"Final val MSE: {val_mse:.6f}")
+            log.info(f"Final test MSE: {test_mse:.6f}  MAE: {test_mae:.6f}")
+
+            out = Path(args.out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                "genome": genome.flatten(),
+                "model_state_dict": ts_model.state_dict(),
+                "val_mse": val_mse,
+                "test_mse": test_mse,
+                "test_mae": test_mae,
+                "dataset": args.ts_dataset,
+                "alpha": getattr(args, 'tidar_alpha', 1.0),
+            }, out / "trained_tidar_ts.pt")
+
+        elif args.mode == "ts-tidar-both":
+            qfn = _make_tidar_ts_quality_fn(args, train_loader, val_loader, pool)
+            population, _ = evolve_with_seeds(
+                args, qfn, _get_seeds(args), causal=False)
+            post_tidar_ts_train(population, pool, train_loader, val_loader,
+                                test_loader, args)
 
         return
 

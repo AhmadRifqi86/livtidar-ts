@@ -3,7 +3,8 @@ Model definitions and loss computation for LIV backbone with dual AR + Diffusion
 
 Reference: arxiv.org/abs/2511.08923
 
-Training sequence layout: [clean_tokens | mask_tokens]  (doubled)
+─── Language Modelling (TiDARModel) ────────────────────────────────────────────
+Training sequence layout: [clean_tokens | mask_tokens]  (doubled, length 2L)
   - Clean section: causal attention (standard AR next-token prediction)
   - Mask section: bidirectional attention to prefix + within block
   - Position IDs shared: mask pos_i == clean pos_i
@@ -11,6 +12,20 @@ Training sequence layout: [clean_tokens | mask_tokens]  (doubled)
 Joint loss: L = 1/(1+α) * [α * L_AR + L_Diff]
   - L_AR:   cross-entropy on clean section (shifted by 1)
   - L_Diff: cross-entropy on mask section (predict original token)
+
+─── Time Series Forecasting (TiDARTSModel) ──────────────────────────────────────
+Training sequence layout: [lookback_tokens (L) | forecast_mask_tokens (H)]
+  - Lookback section: L embedded timesteps, causal attention
+  - Forecast section: H learnable [MASK] embeddings, attends to all lookback
+    tokens + all other forecast positions (bidirectional)
+
+Joint loss: L = 1/(1+α) * [α * L_AR + L_Diff]
+  - L_AR:   MSE on clean (lookback) section — predict next timestep (shifted by 1)
+  - L_Diff: MSE on mask (forecast) section — predict ground-truth future values
+
+Inference modes:
+  - Fast (draft-only):  use diff_head output directly as H-step forecast
+  - Slow (AR-verified): step through ar_head autoregressively, refine drafts
 """
 
 import torch
@@ -176,10 +191,220 @@ def compute_tidar_loss(model: TiDARModel, input_ids: torch.Tensor):
 
 
 # =============================================================================
+# Time Series Config
+# =============================================================================
+
+@dataclass
+class TiDARTSConfig:
+    """TiDAR-TS model configuration. No training hyperparams here."""
+    n_variates: int = 7           # C: number of input channels
+    seq_len: int = 96             # L: lookback window length
+    pred_len: int = 96            # H: forecast horizon length
+    dim: int = 512                # D: model hidden dimension
+    num_heads: int = 8
+
+    # TiDAR-specific
+    alpha: float = 1.0            # loss balance: higher = more weight on AR
+
+    # Default backbone (used when no external backbone is provided)
+    backbone_configs: List[Tuple[int, int, int]] = field(default_factory=lambda: [
+        (1, 2, 3),   # SA-1: standard MHA
+        (9, 1, 2),   # GMemless: SwiGLU FFN
+        (5, 4, 1),   # Rec-1: Mamba-like SSM
+        (9, 1, 2),   # GMemless: SwiGLU FFN
+    ])
+
+
+# =============================================================================
+# TiDAR Time Series Model
+# =============================================================================
+
+class TiDARTSModel(nn.Module):
+    """LIV backbone with TiDAR dual-mode (AR + Diffusion) training for time series.
+
+    Sequence layout: [lookback (L) | forecast_mask (H)]
+      - Lookback tokens: clean embedded timesteps, causal attention
+      - Forecast tokens: learnable [MASK] embedding, bidirectional attention
+        to all lookback tokens + all other forecast positions
+
+    The TIDAR_HYBRID sparsity mask in core/liv.py handles this directly when
+    called with clean_len=seq_len.
+
+    Args:
+        config:   TiDARTSConfig with dimensions and alpha.
+        backbone: Optional pre-built backbone (e.g. from GenomeModelBuilder).
+                  If None, builds default STARBackbone from config.backbone_configs.
+    """
+
+    def __init__(self, config: TiDARTSConfig, backbone: Optional[nn.Module] = None):
+        super().__init__()
+        self.config = config
+
+        # Input projection: embed each timestep (C → D)
+        self.input_proj = nn.Linear(config.n_variates, config.dim)
+
+        # Learnable [MASK] embedding — broadcast over (B, H, D)
+        self.mask_emb = nn.Parameter(torch.zeros(1, 1, config.dim))
+
+        # Positional embedding for L + H total positions
+        self.pos_emb = nn.Embedding(config.seq_len + config.pred_len, config.dim)
+
+        # LIV backbone with hybrid causal+bidirectional mask
+        if backbone is not None:
+            self.backbone = backbone
+        else:
+            self.backbone = STARBackbone(
+                config.backbone_configs, config.dim,
+                num_heads=config.num_heads,
+                sparsity_type=SparsityType.TIDAR_HYBRID,
+            )
+
+        self.norm = nn.LayerNorm(config.dim)
+
+        # Output heads: D → C
+        self.ar_head   = nn.Linear(config.dim, config.n_variates)  # lookback section
+        self.diff_head = nn.Linear(config.dim, config.n_variates)  # forecast section
+
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.normal_(self.mask_emb, std=0.02)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def _forward_backbone(self, x: torch.Tensor, clean_len: int) -> torch.Tensor:
+        """Forward through backbone, passing clean_len for TIDAR_HYBRID sparsity.
+
+        STARBackbone accepts (x, clean_len=...) directly.
+        nn.Sequential (from GenomeModelBuilder) does not — iterate manually.
+        """
+        if isinstance(self.backbone, nn.Sequential):
+            for block in self.backbone:
+                x = block(x, clean_len=clean_len)
+            return x
+        return self.backbone(x, clean_len=clean_len)
+
+    def forward(self, x: torch.Tensor):
+        """Forward with [lookback | forecast_mask] layout.
+
+        Args:
+            x: (B, L, C) lookback window (clean timesteps)
+
+        Returns:
+            ar_pred:   (B, L-1, C) — next-step predictions from lookback section
+            diff_pred: (B, H, C)   — forecast from mask section (draft output)
+        """
+        B, L, C = x.shape
+        H = self.config.pred_len
+        device = x.device
+
+        # ── Embed lookback: (B, L, D) ──
+        clean_emb = self.input_proj(x)
+
+        # ── Forecast mask tokens: (B, H, D) ──
+        mask_emb = self.mask_emb.expand(B, H, -1)
+
+        # ── Concatenate into (B, L+H, D) and add positions ──
+        combined = torch.cat([clean_emb, mask_emb], dim=1)
+        pos_ids  = torch.arange(L + H, device=device).unsqueeze(0)  # (1, L+H)
+        combined = combined + self.pos_emb(pos_ids)
+
+        # ── LIV backbone with hybrid mask (clean_len=L) ──
+        # Handle both STARBackbone (accepts clean_len kwarg) and
+        # nn.Sequential (returned by GenomeModelBuilder — must iterate manually).
+        out = self._forward_backbone(combined, clean_len=L)
+        out = self.norm(out)
+
+        # ── Split and project ──
+        clean_out = out[:, :L]    # (B, L, D)
+        mask_out  = out[:, L:]    # (B, H, D)
+
+        ar_pred   = self.ar_head(clean_out[:, :-1])  # (B, L-1, C)
+        diff_pred = self.diff_head(mask_out)          # (B, H, C)
+
+        return ar_pred, diff_pred
+
+    @torch.no_grad()
+    def forecast(self, x: torch.Tensor, ar_steps: int = 0) -> torch.Tensor:
+        """Inference: draft all H steps, optionally refine with AR.
+
+        Args:
+            x:        (B, L, C) lookback window
+            ar_steps: number of leading steps to refine autoregressively
+                      (0 = pure draft / fast mode; H = full AR / slow mode)
+
+        Returns:
+            pred: (B, H, C) forecast
+        """
+        _, diff_pred = self(x)          # (B, H, C) — fast draft
+
+        if ar_steps <= 0:
+            return diff_pred
+
+        # AR refinement: slide a window of length seq_len along the horizon
+        # and overwrite the leading ar_steps draft predictions one at a time.
+        B, L, C = x.shape
+        H = self.config.pred_len
+        ar_steps = min(ar_steps, H)
+
+        # Build a growing context buffer starting from the lookback window
+        ctx = x.clone()                 # (B, L, C)
+        refined = diff_pred.clone()     # (B, H, C) — will be updated in place
+
+        for t in range(ar_steps):
+            # Use the last seq_len timesteps as the lookback window
+            window = ctx[:, -L:]        # (B, L, C)
+            ar_pred, _ = self(window)   # (B, L-1, C)
+            # ar_pred[:, -1] predicts the next step after window[-1]
+            next_step = ar_pred[:, -1:] # (B, 1, C)
+            refined[:, t:t+1] = next_step
+            ctx = torch.cat([ctx, next_step], dim=1)  # extend context
+
+        return refined
+
+
+# =============================================================================
+# Time Series Loss
+# =============================================================================
+
+def compute_tidar_ts_loss(
+    model: TiDARTSModel,
+    x: torch.Tensor,
+    y: torch.Tensor,
+):
+    """Joint TiDAR-TS loss: L = 1/(1+α) * [α * L_AR + L_Diff]
+
+    Args:
+        model: TiDARTSModel
+        x:     (B, L, C) lookback window
+        y:     (B, H, C) ground-truth forecast
+
+    Returns:
+        (total_loss, ar_loss_scalar, diff_loss_scalar)
+    """
+    ar_pred, diff_pred = model(x)
+    alpha = model.config.alpha
+
+    # AR: next-step prediction on lookback (predict x_{t+1} from x_t)
+    ar_loss = F.mse_loss(ar_pred, x[:, 1:])
+
+    # Diffusion: predict ground-truth forecast from mask tokens
+    diff_loss = F.mse_loss(diff_pred, y)
+
+    total = (1.0 / (1.0 + alpha)) * (alpha * ar_loss + diff_loss)
+    return total, ar_loss.item(), diff_loss.item()
+
+
+# =============================================================================
 # Smoke test
 # =============================================================================
 
 if __name__ == "__main__":
+    # ── Language model ──
+    print("=== TiDAR Language Model ===")
     cfg = TiDARConfig(
         vocab_size=256, dim=128, num_heads=4, max_seq_len=64,
         backbone_configs=[(1, 2, 3), (9, 1, 2)],
@@ -191,3 +416,29 @@ if __name__ == "__main__":
     loss, ar_l, diff_l = compute_tidar_loss(model, x)
     print(f"loss={loss.item():.4f}  ar={ar_l:.4f}  diff={diff_l:.4f}")
     print("OK")
+
+    # ── Time series ──
+    print()
+    print("=== TiDAR Time Series ===")
+    B, L, H, C, D = 4, 96, 48, 7, 128
+    ts_cfg = TiDARTSConfig(
+        n_variates=C, seq_len=L, pred_len=H, dim=D, num_heads=4,
+        backbone_configs=[(1, 2, 3), (9, 1, 2)],
+    )
+    ts_model = TiDARTSModel(ts_cfg)
+    print(f"Params: {sum(p.numel() for p in ts_model.parameters()):,}")
+
+    x_ts = torch.randn(B, L, C)
+    y_ts = torch.randn(B, H, C)
+    ts_loss, ar_l, diff_l = compute_tidar_ts_loss(ts_model, x_ts, y_ts)
+    print(f"loss={ts_loss.item():.4f}  ar={ar_l:.4f}  diff={diff_l:.4f}")
+
+    # Inference — draft mode
+    draft = ts_model.forecast(x_ts, ar_steps=0)
+    assert draft.shape == (B, H, C), f"draft shape mismatch: {draft.shape}"
+    print(f"Draft forecast: {tuple(draft.shape)}  OK")
+
+    # Inference — partial AR refinement (first 4 steps)
+    refined = ts_model.forecast(x_ts, ar_steps=4)
+    assert refined.shape == (B, H, C), f"refined shape mismatch: {refined.shape}"
+    print(f"AR-refined (4 steps): {tuple(refined.shape)}  OK")

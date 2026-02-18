@@ -917,8 +917,10 @@ class UnifiedLIV(nn.Module):
             use_softmax=_use_softmax,
         )
 
-        # Input-dependent channel mixing: W(x) computed per-token
-        self.channel_mix_gen = ChannelMixGenerator(
+        # Static channel mixing: paper-accurate W as nn.Parameter (ChannelMixWeightGeneratorOld).
+        # ChannelMixGenerator (input-dependent W(x)) is kept in the file for experimentation
+        # but is not the paper's definition — paper W is a fixed learned matrix.
+        self.channel_mix_gen = ChannelMixWeightGeneratorOld(
             internal_dim, dim, channel_mix_type,
             num_heads if internal_dim == dim else 1,
         )

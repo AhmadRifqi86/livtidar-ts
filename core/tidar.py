@@ -1,5 +1,5 @@
 """TiDAR: Think in Diffusion, Talk in Autoregression
-Training with LIV backbone using dual AR + Diffusion objectives.
+Model definitions and loss computation for LIV backbone with dual AR + Diffusion.
 
 Reference: arxiv.org/abs/2511.08923
 
@@ -16,10 +16,8 @@ Joint loss: L = 1/(1+α) * [α * L_AR + L_Diff]
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-import os
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from core.liv import (
     STARBackbone, SparsityType,
@@ -28,12 +26,12 @@ from core.liv import (
 
 
 # =============================================================================
-# Configuration
+# Configuration (model-only — training config lives in src/train.py CLI)
 # =============================================================================
 
 @dataclass
 class TiDARConfig:
-    # Model
+    """TiDAR model configuration. No training hyperparams here."""
     vocab_size: int = 32000
     dim: int = 512
     num_heads: int = 8
@@ -44,25 +42,13 @@ class TiDARConfig:
     alpha: float = 1.0            # loss balance: higher = more weight on AR
     mask_token_id: int = -1       # auto-set to vocab_size
 
-    # Backbone: list of (featurizer_cls, token_mix_type, channel_mix_type)
+    # Default backbone (used when no genome/external backbone is provided)
     backbone_configs: List[Tuple[int, int, int]] = field(default_factory=lambda: [
         (1, 2, 3),   # SA-1: standard MHA
         (9, 1, 2),   # GMemless: SwiGLU FFN
         (5, 4, 1),   # Rec-1: Mamba-like SSM
         (9, 1, 2),   # GMemless: SwiGLU FFN
     ])
-
-    # Training
-    lr: float = 1e-4
-    min_lr: float = 1e-6
-    warmup_steps: int = 500
-    max_steps: int = 50000
-    batch_size: int = 8
-    grad_clip: float = 1.0
-    weight_decay: float = 0.01
-    log_interval: int = 50
-    save_interval: int = 5000
-    save_dir: str = "./checkpoints"
 
     def __post_init__(self):
         if self.mask_token_id == -1:
@@ -80,9 +66,14 @@ class TiDARModel(nn.Module):
     hybrid causal+bidirectional attention mask. Each LIV block auto-creates
     its own SparsityMask with correct fill value (−inf for softmax blocks,
     0 for others) via the sparsity_type parameter.
+
+    Args:
+        config:   TiDARConfig with model dimensions and alpha.
+        backbone: Optional pre-built backbone (e.g. from GenomeModelBuilder).
+                  If None, builds default STARBackbone from config.backbone_configs.
     """
 
-    def __init__(self, config: TiDARConfig):
+    def __init__(self, config: TiDARConfig, backbone: Optional[nn.Module] = None):
         super().__init__()
         self.config = config
 
@@ -90,12 +81,15 @@ class TiDARModel(nn.Module):
         self.tok_emb = nn.Embedding(config.vocab_size + 1, config.dim)
         self.pos_emb = nn.Embedding(config.max_seq_len, config.dim)
 
-        # LIV backbone — sparsity_type flows through **kwargs to each block
-        self.backbone = STARBackbone(
-            config.backbone_configs, config.dim,
-            num_heads=config.num_heads,
-            sparsity_type=SparsityType.TIDAR_HYBRID,
-        )
+        # LIV backbone — either external (genome-built) or default
+        if backbone is not None:
+            self.backbone = backbone
+        else:
+            self.backbone = STARBackbone(
+                config.backbone_configs, config.dim,
+                num_heads=config.num_heads,
+                sparsity_type=SparsityType.TIDAR_HYBRID,
+            )
 
         self.norm = nn.LayerNorm(config.dim)
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
@@ -182,118 +176,18 @@ def compute_tidar_loss(model: TiDARModel, input_ids: torch.Tensor):
 
 
 # =============================================================================
-# LR Schedule
-# =============================================================================
-
-def get_lr(step: int, config: TiDARConfig) -> float:
-    """Cosine decay with linear warmup."""
-    if step < config.warmup_steps:
-        return config.lr * step / max(1, config.warmup_steps)
-    progress = (step - config.warmup_steps) / max(
-        1, config.max_steps - config.warmup_steps
-    )
-    return config.min_lr + 0.5 * (config.lr - config.min_lr) * (
-        1.0 + math.cos(math.pi * progress)
-    )
-
-
-# =============================================================================
-# Training Loop
-# =============================================================================
-
-def train(config: TiDARConfig, dataset):
-    """Train TiDAR-LIV model.
-
-    Args:
-        config:  TiDARConfig
-        dataset: iterable yielding [batch, seq_len] token-ID tensors
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = TiDARModel(config).to(device)
-
-    param_count = sum(p.numel() for p in model.parameters())
-    print(f"TiDAR-LIV | params: {param_count:,} | device: {device}")
-    print(f"  alpha={config.alpha}, block_size={config.block_size}")
-    print(f"  backbone: {config.backbone_configs}")
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.lr,
-        betas=(0.9, 0.95),
-        weight_decay=config.weight_decay,
-    )
-
-    os.makedirs(config.save_dir, exist_ok=True)
-    model.train()
-    step = 0
-
-    for batch in dataset:
-        if step >= config.max_steps:
-            break
-
-        # LR schedule
-        lr = get_lr(step, config)
-        for pg in optimizer.param_groups:
-            pg["lr"] = lr
-
-        input_ids = batch.to(device)
-        loss, ar_loss, diff_loss = compute_tidar_loss(model, input_ids)
-
-        optimizer.zero_grad()
-        loss.backward()
-        if config.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-        optimizer.step()
-
-        if step % config.log_interval == 0:
-            print(
-                f"step {step:6d} | loss {loss.item():.4f} | "
-                f"ar {ar_loss:.4f} | diff {diff_loss:.4f} | lr {lr:.2e}"
-            )
-
-        if step > 0 and step % config.save_interval == 0:
-            path = os.path.join(config.save_dir, f"tidar_step{step}.pt")
-            torch.save(
-                {"step": step, "model": model.state_dict(),
-                 "optimizer": optimizer.state_dict(), "config": config},
-                path,
-            )
-            print(f"  saved {path}")
-
-        step += 1
-
-    # Final save
-    path = os.path.join(config.save_dir, "tidar_final.pt")
-    torch.save(
-        {"step": step, "model": model.state_dict(),
-         "optimizer": optimizer.state_dict(), "config": config},
-        path,
-    )
-    print(f"Training done ({step} steps). Saved {path}")
-    return model
-
-
-# =============================================================================
 # Smoke test
 # =============================================================================
 
 if __name__ == "__main__":
     cfg = TiDARConfig(
-        vocab_size=256,
-        dim=128,
-        num_heads=4,
-        max_seq_len=64,
-        batch_size=4,
-        max_steps=20,
-        log_interval=5,
-        backbone_configs=[
-            (1, 2, 3),   # SA-1
-            (9, 1, 2),   # GMemless
-        ],
+        vocab_size=256, dim=128, num_heads=4, max_seq_len=64,
+        backbone_configs=[(1, 2, 3), (9, 1, 2)],
     )
+    model = TiDARModel(cfg)
+    print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
 
-    def dummy_data():
-        for _ in range(cfg.max_steps):
-            yield torch.randint(0, cfg.vocab_size, (cfg.batch_size, 32))
-
-    train(cfg, dummy_data())
+    x = torch.randint(0, 256, (4, 32))
+    loss, ar_l, diff_l = compute_tidar_loss(model, x)
+    print(f"loss={loss.item():.4f}  ar={ar_l:.4f}  diff={diff_l:.4f}")
+    print("OK")

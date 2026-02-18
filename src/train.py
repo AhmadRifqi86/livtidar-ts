@@ -1,19 +1,31 @@
-"""STAR Training: Evolution-guided architecture search with LIV operators.
+"""STAR + TiDAR Unified Training: Evolution-guided architecture search with LIV operators.
 
-Paper: STAR — Synthesis of Tailored Architectures (arXiv:2411.17800v1)
+Papers:
+  - STAR — Synthesis of Tailored Architectures (arXiv:2411.17800v1)
+  - TiDAR — Think in Diffusion, Act in Autoregression (arXiv:2511.08923)
 
-Training recipe from paper (Table A.1 / A.2):
+Training recipe from STAR paper (Table A.1 / A.2):
   - AdamW: lr=8e-4, β1=0.9, β2=0.95, weight_decay=0.1
   - Cosine LR decay, 500-step warmup, grad_clip=1.0
   - Batch: 0.25M tokens/step, seq_len=4096
   - Evolution: 5000 steps/candidate, pop=16, gen=18
   - Post-evolution: top-8, 20000 steps (~5B tokens)
 
+Modes:
+  Language model:  evolve / train / both
+  Detection:       detect-evolve / detect-train / detect-both
+  TiDAR:           tidar-evolve / tidar-train / tidar-both
+  Time series:     ts-evolve / ts-train / ts-both
+
 Usage:
-    python train.py evolve --synthetic                  # quick test
-    python train.py evolve --data_path tokens.pt        # real data
-    python train.py train  --genome_path best.json ...  # train one genome
-    python train.py both   --synthetic                  # evolve + train top-K
+    python -m src.train evolve --synthetic
+    python -m src.train train  --genome_path best.json ...
+    python -m src.train both   --synthetic
+    python -m src.train tidar-evolve --synthetic
+    python -m src.train tidar-train  --genome_path best.json --synthetic
+    python -m src.train tidar-both   --synthetic
+    python -m src.train ts-train --ts_dataset ETTh1 --ts_structure itransformer
+    python -m src.train ts-evolve --ts_dataset ETTh1 --ts_structure dmamba
 """
 
 import argparse
@@ -29,7 +41,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nsga import (
+from core.nsga import (
     build_class_pool, random_genome, repair,
     Genome, LayerGene, Individual, FitnessResult,
     GenomeModelBuilder, FitnessEvaluator,
@@ -39,6 +51,9 @@ from nsga import (
     DEFAULT_POP_SIZE, DEFAULT_GENERATIONS, DEFAULT_MUTATION_PROB,
     DEFAULT_ELITISM, DEFAULT_CROSSOVER_POINTS, DEFAULT_TOURNAMENT_K,
 )
+
+from core.tidar import TiDARConfig, TiDARModel, compute_tidar_loss
+from src.dataload import get_dataloader, get_dataset_info
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,12 +100,7 @@ class STARLanguageModel(nn.Module):
 
 
 class STARVisionModel(nn.Module):
-    """Vision model: patch_embed -> LIV backbone (causal=False) -> pool -> head.
-
-    Build the backbone with causal=False:
-        backbone = GenomeModelBuilder(pool, dim, causal=False).build(genome)
-        model = STARVisionModel(backbone, num_classes=10, dim=64)
-    """
+    """Vision model: patch_embed -> LIV backbone (causal=False) -> pool -> head."""
 
     def __init__(self, backbone, num_classes, dim,
                  img_size=32, patch_size=4, in_channels=3):
@@ -112,11 +122,9 @@ class STARVisionModel(nn.Module):
         nn.init.zeros_(self.patch_embed.bias)
 
     def forward(self, imgs, targets=None):
-        # [B, C, H, W] -> [B, num_patches, dim]
         x = self.patch_embed(imgs).flatten(2).transpose(1, 2)
         x = x + self.pos_embed
         x = self.backbone(x)
-        # Global average pool -> classify
         x = x.mean(dim=1)
         logits = self.head(self.norm(x))
         loss = None
@@ -174,15 +182,7 @@ def _box_giou_paired(pred, target):
 
 
 class STARVisionDetector(nn.Module):
-    """Object detection: patch_embed -> LIV backbone (causal=False) -> detection heads.
-
-    Each patch token predicts objectness, class, and bounding box (cx, cy, w, h).
-    GT boxes are assigned to the patch containing their center.
-
-    Build the backbone with causal=False:
-        backbone = GenomeModelBuilder(pool, dim, causal=False).build(genome)
-        model = STARVisionDetector(backbone, num_classes=20, dim=256)
-    """
+    """Object detection: patch_embed -> LIV backbone (causal=False) -> detection heads."""
 
     def __init__(self, backbone, num_classes, dim,
                  img_size=224, patch_size=16, in_channels=3):
@@ -218,15 +218,14 @@ class STARVisionDetector(nn.Module):
 
     def forward(self, imgs, targets=None):
         B = imgs.size(0)
-        # [B, C, H, W] -> [B, num_patches, dim]
         x = self.patch_embed(imgs).flatten(2).transpose(1, 2)
         x = x + self.pos_embed
         x = self.backbone(x)
         x = self.norm(x)
 
-        cls_logits = self.cls_head(x)                  # [B, P, num_classes]
-        obj_logits = self.obj_head(x).squeeze(-1)      # [B, P]
-        bbox_pred = self.bbox_head(x).sigmoid()         # [B, P, 4] in [0,1]
+        cls_logits = self.cls_head(x)
+        obj_logits = self.obj_head(x).squeeze(-1)
+        bbox_pred = self.bbox_head(x).sigmoid()
 
         loss = None
         if targets is not None:
@@ -244,13 +243,11 @@ class STARVisionDetector(nn.Module):
             obj_target = torch.zeros(self.num_patches, device=device)
 
             if len(boxes) > 0:
-                # Assign each GT box to the patch containing its center
                 cx, cy = boxes[:, 0], boxes[:, 1]
                 gx = (cx * self.grid_size).long().clamp(0, self.grid_size - 1)
                 gy = (cy * self.grid_size).long().clamp(0, self.grid_size - 1)
                 patch_idx = gy * self.grid_size + gx
 
-                # Deduplicate: keep last assignment per patch
                 uniq, inv = torch.unique(patch_idx, return_inverse=True)
                 a_boxes = torch.zeros(len(uniq), 4, device=device)
                 a_labels = torch.zeros(len(uniq), dtype=torch.long, device=device)
@@ -260,20 +257,194 @@ class STARVisionDetector(nn.Module):
 
                 obj_target[uniq] = 1.0
 
-                # Bbox loss: L1 + GIoU
                 pred_b = bbox_pred[b, uniq]
                 l1 = F.l1_loss(pred_b, a_boxes, reduction='mean')
                 giou = 1.0 - _box_giou_paired(pred_b, a_boxes).mean()
 
-                # Classification loss on positive patches
                 cls_loss = F.cross_entropy(cls_logits[b, uniq], a_labels)
 
                 total_loss = total_loss + cls_loss + l1 * 5.0 + giou * 2.0
 
-            # Objectness focal loss on all patches
             total_loss = total_loss + _sigmoid_focal_loss(obj_logits[b], obj_target)
 
         return total_loss / B
+
+
+# ============================================================================
+# Time Series Forecasting Model
+# ============================================================================
+
+class RevIN(nn.Module):
+    """Reversible Instance Normalization (Kim et al., 2022)."""
+
+    def __init__(self, num_features, eps=1e-5, affine=True):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.affine = affine
+        if affine:
+            self.affine_weight = nn.Parameter(torch.ones(num_features))
+            self.affine_bias = nn.Parameter(torch.zeros(num_features))
+
+    def forward(self, x, mode='norm'):
+        """x: (B, L, C)"""
+        if mode == 'norm':
+            self._mean = x.mean(dim=1, keepdim=True).detach()
+            self._stdev = (x.var(dim=1, keepdim=True, unbiased=False) + self.eps).sqrt().detach()
+            x = (x - self._mean) / self._stdev
+            if self.affine:
+                x = x * self.affine_weight + self.affine_bias
+            return x
+        elif mode == 'denorm':
+            if self.affine:
+                x = (x - self.affine_bias) / (self.affine_weight + self.eps)
+            x = x * self._stdev + self._mean
+            return x
+
+
+class EMADecomposition(nn.Module):
+    """EMA-based trend-seasonal decomposition (DMamba-style).
+
+    Learnable per-channel smoothing factor alpha decomposed into
+    trend (low-freq EMA) and seasonal (residual) components.
+    """
+
+    def __init__(self, n_variates):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.full((n_variates,), 0.5))
+
+    def forward(self, x):
+        """x: (B, L, C) → (seasonal, trend) each (B, L, C)"""
+        alpha = torch.sigmoid(self.alpha)  # (C,) in [0,1]
+        B, L, C = x.shape
+        trend = torch.zeros_like(x)
+        trend[:, 0] = x[:, 0]
+        for t in range(1, L):
+            trend[:, t] = alpha * trend[:, t - 1] + (1 - alpha) * x[:, t]
+        seasonal = x - trend
+        return seasonal, trend
+
+
+class STARLIVTSModel(nn.Module):
+    """Time series forecasting with LIV backbone.
+
+    Structural approaches:
+      'dmamba':       Decomposition + dual LIV flow (seasonal + trend)
+      'smamba':       Variate-first tokenization + LIV backbone
+      'itransformer': Inverted variate tokens + N LIV blocks
+
+    Data flow:
+      dmamba:         (B,L,C) → RevIN → EMA decomp
+                        seasonal: embed(C→D) → backbone → proj(D→C) → temporal(L→H)
+                        trend:    embed(C→D) → backbone → proj(D→C) → temporal(L→H)
+                        sum → RevIN denorm → (B,H,C)
+      smamba/itrans:  (B,L,C) → (B,C,L) → embed(L→D) → backbone(C tokens) → proj(D→H) → (B,H,C)
+
+    Args:
+        backbone:       Main LIV backbone (for seasonal in dmamba, sole backbone in smamba/itrans)
+        n_variates:     Number of input variates (C)
+        seq_len:        Lookback window length (L)
+        pred_len:       Forecast horizon length (H)
+        dim:            Model hidden dimension (D)
+        structure:      'dmamba', 'smamba', or 'itransformer'
+        backbone_trend: Separate backbone for trend path (dmamba only, shared if None)
+    """
+
+    def __init__(self, backbone, n_variates, seq_len, pred_len, dim,
+                 structure='itransformer', backbone_trend=None):
+        super().__init__()
+        self.structure = structure
+        self.n_variates = n_variates
+        self.seq_len = seq_len
+        self.pred_len = pred_len
+        self.dim = dim
+
+        if structure == 'dmamba':
+            self.revin = RevIN(n_variates)
+            self.decomp = EMADecomposition(n_variates)
+            # Seasonal path
+            self.seasonal_embed = nn.Linear(n_variates, dim)
+            self.seasonal_backbone = backbone
+            self.seasonal_proj = nn.Linear(dim, n_variates)
+            self.seasonal_temporal = nn.Linear(seq_len, pred_len)
+            # Trend path
+            self.trend_embed = nn.Linear(n_variates, dim)
+            if backbone_trend is not None:
+                self.trend_backbone = backbone_trend
+            else:
+                self.trend_backbone = backbone
+            self.trend_proj = nn.Linear(dim, n_variates)
+            self.trend_temporal = nn.Linear(seq_len, pred_len)
+
+        elif structure in ('smamba', 'itransformer'):
+            # Variate embedding: each variate's L timepoints → D-dim token
+            self.variate_embed = nn.Linear(seq_len, dim)
+            self.backbone = backbone
+            self.variate_proj = nn.Linear(dim, pred_len)
+
+        else:
+            raise ValueError(f"Unknown structure: {structure}")
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in (self.modules()):
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        """
+        Args:  x: (B, seq_len, C) lookback window
+        Returns: pred: (B, pred_len, C) forecast
+        """
+        if self.structure == 'dmamba':
+            return self._forward_dmamba(x)
+        else:
+            return self._forward_inverted(x)
+
+    def _forward_dmamba(self, x):
+        """Approach A: Decomposition + dual flow."""
+        # RevIN normalize
+        x = self.revin(x, mode='norm')
+        # Decompose
+        seasonal, trend = self.decomp(x)
+
+        # Seasonal path: (B,L,C) → embed → backbone → proj → temporal
+        s = self.seasonal_embed(seasonal)       # (B, L, D)
+        s = self.seasonal_backbone(s)           # (B, L, D)
+        s = self.seasonal_proj(s)               # (B, L, C)
+        s = s.transpose(1, 2)                   # (B, C, L)
+        s = self.seasonal_temporal(s)           # (B, C, H)
+        s = s.transpose(1, 2)                   # (B, H, C)
+
+        # Trend path: (B,L,C) → embed → backbone → proj → temporal
+        t = self.trend_embed(trend)             # (B, L, D)
+        t = self.trend_backbone(t)              # (B, L, D)
+        t = self.trend_proj(t)                  # (B, L, C)
+        t = t.transpose(1, 2)                   # (B, C, L)
+        t = self.trend_temporal(t)              # (B, C, H)
+        t = t.transpose(1, 2)                   # (B, H, C)
+
+        # Aggregate + denormalize
+        out = s + t
+        out = self.revin(out, mode='denorm')
+        return out
+
+    def _forward_inverted(self, x):
+        """Approach B/C: Inverted variate tokens."""
+        # (B, L, C) → (B, C, L) — each variate becomes a token
+        x = x.transpose(1, 2)
+        # Embed: (B, C, L) → (B, C, D)
+        x = self.variate_embed(x)
+        # Backbone: processes C variate tokens
+        x = self.backbone(x)                    # (B, C, D)
+        # Project: (B, C, D) → (B, C, H)
+        x = self.variate_proj(x)
+        # (B, C, H) → (B, H, C)
+        x = x.transpose(1, 2)
+        return x
 
 
 # ============================================================================
@@ -378,7 +549,7 @@ class DetectionDataset:
     """Object detection dataset supporting VOC and COCO formats."""
 
     def __init__(self, items, img_size, augment=False):
-        self.items = items  # list of (img_path, boxes[N,4], labels[N])
+        self.items = items
         self.img_size = img_size
         self.augment = augment
 
@@ -402,7 +573,6 @@ class DetectionDataset:
             boxes_t = boxes.clone()
             labels_t = labels.clone()
 
-            # Random horizontal flip
             if self.augment and random.random() > 0.5:
                 img_t = img_t.flip(-1)
                 boxes_t[:, 0] = 1.0 - boxes_t[:, 0]
@@ -414,7 +584,7 @@ class DetectionDataset:
 
     @classmethod
     def from_voc(cls, root, year='2007', split='trainval', img_size=224):
-        """Load PASCAL VOC. Expects VOCdevkit/VOC{year}/ under root."""
+        """Load PASCAL VOC."""
         import xml.etree.ElementTree as ET
 
         voc_dir = os.path.join(root, 'VOCdevkit', f'VOC{year}')
@@ -463,7 +633,7 @@ class DetectionDataset:
 
     @classmethod
     def from_coco(cls, img_dir, ann_file, img_size=224, max_images=None):
-        """Load COCO. img_dir has images, ann_file is instances JSON."""
+        """Load COCO."""
         with open(ann_file) as f:
             coco = json.load(f)
 
@@ -544,7 +714,7 @@ def load_detection_data(args):
 
 
 # ============================================================================
-# Training & Evaluation
+# Training & Evaluation — Language Model
 # ============================================================================
 
 def train_model(model, train_data, val_data, args, steps, prefix=""):
@@ -559,7 +729,6 @@ def train_model(model, train_data, val_data, args, steps, prefix=""):
         weight_decay=args.weight_decay,
     )
 
-    # Gradient accumulation: total batch = batch_tokens / seq_len sequences
     total_bs = max(1, args.batch_tokens // args.seq_len)
     micro_bs = min(total_bs, args.micro_batch)
     grad_accum = max(1, total_bs // micro_bs)
@@ -627,7 +796,7 @@ def evaluate_ppl(model, val_data, args, n_batches=None):
 
 
 # ============================================================================
-# Detection Training & Evaluation
+# Training & Evaluation — Detection
 # ============================================================================
 
 def train_detector(model, train_data, val_data, args, steps, prefix=""):
@@ -705,6 +874,202 @@ def evaluate_det_loss(model, val_data, args, n_batches=None):
 
 
 # ============================================================================
+# Training & Evaluation — TiDAR
+# ============================================================================
+
+def train_tidar_model(model, train_data, val_data, args, steps, prefix=""):
+    """Train TiDAR model for `steps` steps with AMP and grad accumulation.
+
+    Uses compute_tidar_loss() from core.tidar for the joint AR+Diffusion loss.
+    Returns validation TiDAR loss (lower is better).
+    """
+    device = args.device
+    model = model.to(device)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        betas=(args.beta1, args.beta2),
+        weight_decay=args.weight_decay,
+    )
+
+    total_bs = max(1, args.batch_tokens // args.seq_len)
+    micro_bs = min(total_bs, args.micro_batch)
+    grad_accum = max(1, total_bs // micro_bs)
+
+    use_amp = args.amp and device != "cpu"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    log_every = max(1, steps // 20)
+
+    model.train()
+    running_total, running_ar, running_diff = 0.0, 0.0, 0.0
+
+    for step in range(steps):
+        lr = get_lr(step, args.warmup_steps, steps, args.lr)
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr
+
+        optimizer.zero_grad()
+        step_total, step_ar, step_diff = 0.0, 0.0, 0.0
+
+        for _ in range(grad_accum):
+            # TiDAR only needs input_ids (no separate targets)
+            x, _ = train_data.get_batch(micro_bs, device)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                loss, ar_loss, diff_loss = compute_tidar_loss(model, x)
+                loss = loss / grad_accum
+            scaler.scale(loss).backward()
+            step_total += loss.item()
+            step_ar += ar_loss / grad_accum
+            step_diff += diff_loss / grad_accum
+
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        scaler.step(optimizer)
+        scaler.update()
+
+        running_total += step_total
+        running_ar += step_ar
+        running_diff += step_diff
+        if (step + 1) % log_every == 0:
+            n = log_every
+            log.info(f"{prefix}step {step+1}/{steps}  lr={lr:.2e}  "
+                     f"loss={running_total/n:.4f}  ar={running_ar/n:.4f}  "
+                     f"diff={running_diff/n:.4f}")
+            running_total, running_ar, running_diff = 0.0, 0.0, 0.0
+
+    val_loss = evaluate_tidar_loss(model, val_data, args)
+    model.cpu()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return val_loss
+
+
+@torch.no_grad()
+def evaluate_tidar_loss(model, val_data, args, n_batches=None):
+    """Validation TiDAR loss (joint AR + Diffusion)."""
+    n_batches = n_batches or args.eval_batches
+    device = next(model.parameters()).device
+    micro_bs = min(max(1, args.batch_tokens // args.seq_len), args.micro_batch)
+
+    model.eval()
+    total_loss, count = 0.0, 0
+    for _ in range(n_batches):
+        x, _ = val_data.get_batch(micro_bs, device)
+        with torch.amp.autocast("cuda", enabled=args.amp and str(device) != "cpu"):
+            loss, _, _ = compute_tidar_loss(model, x)
+        total_loss += loss.item()
+        count += 1
+
+    model.train()
+    return total_loss / max(count, 1)
+
+
+def _build_tidar_from_backbone(backbone, args):
+    """Wrap a genome-built backbone in a TiDARModel."""
+    cfg = TiDARConfig(
+        vocab_size=args.vocab_size,
+        dim=args.dim,
+        num_heads=getattr(args, 'num_heads', 8),
+        max_seq_len=args.seq_len,
+        alpha=getattr(args, 'tidar_alpha', 1.0),
+    )
+    return TiDARModel(cfg, backbone=backbone)
+
+
+def _build_ts_from_backbone(backbone, args, backbone_trend=None):
+    """Wrap a genome-built backbone in STARLIVTSModel."""
+    return STARLIVTSModel(
+        backbone, args.n_variates, args.ts_seq_len, args.ts_pred_len,
+        args.dim, structure=args.ts_structure, backbone_trend=backbone_trend,
+    )
+
+
+# ============================================================================
+# Training & Evaluation — Time Series
+# ============================================================================
+
+def train_ts_model(model, train_loader, val_loader, args, steps=None, prefix=""):
+    """Train time series model with DataLoader. Returns validation MSE."""
+    device = args.device
+    model = model.to(device)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr,
+        betas=(args.beta1, args.beta2), weight_decay=args.weight_decay,
+    )
+
+    use_amp = args.amp and device != "cpu"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    total_steps = steps or getattr(args, 'train_steps', 10000)
+    log_every = max(1, total_steps // 20)
+
+    model.train()
+    running = 0.0
+    step = 0
+
+    while step < total_steps:
+        for batch_x, batch_y in train_loader:
+            if step >= total_steps:
+                break
+
+            lr = get_lr(step, args.warmup_steps, total_steps, args.lr)
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
+
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
+
+            optimizer.zero_grad()
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                pred = model(batch_x)
+                loss = F.mse_loss(pred, batch_y)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+
+            running += loss.item()
+            step += 1
+
+            if step % log_every == 0:
+                log.info(f"{prefix}step {step}/{total_steps}  lr={lr:.2e}  "
+                         f"mse={running/log_every:.6f}")
+                running = 0.0
+
+    val_mse, val_mae = evaluate_ts(model, val_loader, args)
+    log.info(f"{prefix}val MSE={val_mse:.6f}  MAE={val_mae:.6f}")
+    model.cpu()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return val_mse
+
+
+@torch.no_grad()
+def evaluate_ts(model, dataloader, args):
+    """Evaluate time series model. Returns (MSE, MAE)."""
+    device = next(model.parameters()).device
+    model.eval()
+
+    total_mse, total_mae, n = 0.0, 0.0, 0
+    for batch_x, batch_y in dataloader:
+        batch_x = batch_x.to(device)
+        batch_y = batch_y.to(device)
+        with torch.amp.autocast("cuda", enabled=args.amp and str(device) != "cpu"):
+            pred = model(batch_x)
+        total_mse += F.mse_loss(pred, batch_y, reduction='sum').item()
+        total_mae += F.l1_loss(pred, batch_y, reduction='sum').item()
+        n += batch_y.numel()
+
+    model.train()
+    mse = total_mse / max(n, 1)
+    mae = total_mae / max(n, 1)
+    return mse, mae
+
+
+# ============================================================================
 # Seed Genomes — Known-Good Architectures (Paper Section 4.1)
 # ============================================================================
 
@@ -730,11 +1095,7 @@ def seed_hybrid_conv(n):
 # ============================================================================
 
 def evolve_with_seeds(args, quality_fn, seed_genomes=None, **evaluator_kwargs):
-    """NSGA-II evolution loop with seed genomes, logging, and checkpoints.
-
-    Uses all genetic operators from nsga.py; adds seed initialization and
-    per-generation checkpointing.  Pass causal=False for detection tasks.
-    """
+    """NSGA-II evolution loop with seed genomes, logging, and checkpoints."""
     rng = random.Random(args.seed)
     class_pool = build_class_pool(getattr(args, "include_extended", False))
     evaluator = FitnessEvaluator(
@@ -765,38 +1126,30 @@ def evolve_with_seeds(args, quality_fn, seed_genomes=None, **evaluator_kwargs):
         population.append(Individual(genome=g, fitness=f))
         log.info(f"  quality={f.quality:.2f}  params={f.param_count:,}")
 
-    # --- Evolution loop (Paper: 18 generations, pop=16) ---
+    # --- Evolution loop ---
     for gen in range(args.generations):
         t0 = time.time()
         log.info(f"\n{'='*60}\nGeneration {gen+1}/{args.generations}\n{'='*60}")
 
-        # 1. Non-dominated sort + crowding distance
         fronts = non_dominated_sort(population)
         for front in fronts:
             crowding_distance(population, front)
         population.sort(key=lambda ind: (ind.rank, -ind.crowding_distance))
 
-        # Log Pareto front
         pf = [p for p in population if p.rank == 0]
         log.info(f"Pareto front: {len(pf)} individuals")
         for i, ind in enumerate(pf):
             log.info(f"  [{i}] q={ind.fitness.quality:.2f} "
                      f"p={ind.fitness.param_count:,} c={ind.fitness.kv_cache_size:,}")
 
-        # Checkpoint
         _save_checkpoint(out_dir / f"gen_{gen+1:02d}.json", population, gen + 1)
 
-        # 2. Create offspring
         offspring = []
-
-        # Elitism (Paper: 2 elite individuals)
         for i in range(min(args.elitism, len(population))):
             offspring.append(Individual(
                 genome=population[i].genome.copy(), fitness=population[i].fitness,
             ))
 
-        # Crossover + mutation (Paper: 2-point crossover, 10% mutation)
-        child_idx = len(offspring)
         while len(offspring) < pop_size:
             p1 = tournament_select(population, args.tournament_k, rng)
             p2 = tournament_select(population, args.tournament_k, rng)
@@ -866,11 +1219,11 @@ def load_genome(path, num_layers):
 
 
 # ============================================================================
-# Post-Evolution: Train Top-K (Paper Section 4.2 — 5B tokens)
+# Post-Evolution: Train Top-K
 # ============================================================================
 
 def post_evolution_train(population, class_pool, train_data, val_data, args):
-    """Select top-K Pareto-optimal genomes and train to convergence."""
+    """Select top-K Pareto-optimal genomes and train LM to convergence."""
     candidates = sorted(
         [ind for ind in population if ind.rank == 0],
         key=lambda ind: ind.fitness.quality,
@@ -912,33 +1265,6 @@ def post_evolution_train(population, class_pool, train_data, val_data, args):
         log.info(f"  #{rank+1}  PPL={ppl:.2f}  params={ind.fitness.param_count:,}")
     log.info("=" * 60)
     return results
-
-
-# ============================================================================
-# Detection: NSGA Quality & Post-Evolution Training
-# ============================================================================
-
-def _make_detect_quality_fn(args, train_data, val_data):
-    """Quality function for detection NSGA: wraps backbone in detector."""
-    if getattr(args, "dry_run", False):
-        return None
-    evo_steps = getattr(args, "evolution_steps", 500)
-    counter = [0]
-
-    def quality_fn(backbone, genome):
-        counter[0] += 1
-        det = STARVisionDetector(
-            backbone, args.num_classes, args.dim,
-            img_size=args.img_size, patch_size=args.patch_size,
-        )
-        n = count_params(det)
-        log.info(f"[DetEval #{counter[0]}] {n:,} params, {evo_steps} steps")
-        val_loss = train_detector(det, train_data, val_data, args,
-                                  steps=evo_steps, prefix=f"[DE{counter[0]}] ")
-        log.info(f"[DetEval #{counter[0]}] val_loss={val_loss:.4f}")
-        return val_loss
-
-    return quality_fn
 
 
 def post_det_train(population, class_pool, train_data, val_data, args):
@@ -992,15 +1318,205 @@ def post_det_train(population, class_pool, train_data, val_data, args):
     return results
 
 
+def post_tidar_train(population, class_pool, train_data, val_data, args):
+    """Select top-K Pareto-optimal genomes and train TiDAR to convergence."""
+    candidates = sorted(
+        [ind for ind in population if ind.rank == 0],
+        key=lambda ind: ind.fitness.quality,
+    )[:args.top_k]
+    if not candidates:
+        candidates = sorted(population, key=lambda ind: ind.fitness.quality)[:args.top_k]
+
+    log.info(f"\n{'='*60}\nPost-evolution TiDAR: "
+             f"training {len(candidates)} candidates\n{'='*60}")
+    builder = GenomeModelBuilder(class_pool, args.dim)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+
+    for i, ind in enumerate(candidates):
+        log.info(f"\n--- Candidate {i+1}/{len(candidates)} ---")
+        log.info(f"Evolution quality={ind.fitness.quality:.2f}  params={ind.fitness.param_count:,}")
+        classes = [g.liv_class for g in ind.genome.layers]
+        log.info(f"Layer classes: {classes}")
+
+        backbone = builder.build(ind.genome)
+        tidar = _build_tidar_from_backbone(backbone, args)
+        log.info(f"Total params (with embed): {count_params(tidar):,}")
+
+        val_loss = train_tidar_model(tidar, train_data, val_data, args,
+                                     steps=args.full_train_steps,
+                                     prefix=f"[C{i+1}] ")
+        log.info(f"Candidate {i+1} final TiDAR loss: {val_loss:.4f}")
+        results.append((ind, val_loss))
+
+        torch.save({
+            "genome": ind.genome.flatten(),
+            "layer_classes": classes,
+            "model_state_dict": tidar.state_dict(),
+            "tidar_loss": val_loss,
+            "params": ind.fitness.param_count,
+        }, out_dir / f"tidar_candidate_{i+1}.pt")
+
+    results.sort(key=lambda x: x[1])
+    log.info(f"\n{'='*60}\nFinal TiDAR results (sorted by loss):")
+    for rank, (ind, vl) in enumerate(results):
+        log.info(f"  #{rank+1}  loss={vl:.4f}  params={ind.fitness.param_count:,}")
+    log.info("=" * 60)
+    return results
+
+
+def post_ts_train(population, class_pool, train_loader, val_loader, test_loader, args):
+    """Select top-K Pareto-optimal genomes and train TS models to convergence."""
+    candidates = sorted(
+        [ind for ind in population if ind.rank == 0],
+        key=lambda ind: ind.fitness.quality,
+    )[:args.top_k]
+    if not candidates:
+        candidates = sorted(population, key=lambda ind: ind.fitness.quality)[:args.top_k]
+
+    log.info(f"\n{'='*60}\nPost-evolution TS: "
+             f"training {len(candidates)} candidates\n{'='*60}")
+    causal = (args.ts_structure == 'dmamba')
+    builder = GenomeModelBuilder(class_pool, args.dim, causal=causal)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+
+    for i, ind in enumerate(candidates):
+        log.info(f"\n--- Candidate {i+1}/{len(candidates)} ---")
+        log.info(f"Evolution quality={ind.fitness.quality:.6f}  params={ind.fitness.param_count:,}")
+        classes = [g.liv_class for g in ind.genome.layers]
+        log.info(f"Layer classes: {classes}")
+
+        backbone = builder.build(ind.genome)
+        ts_model = _build_ts_from_backbone(backbone, args)
+        log.info(f"Total params: {count_params(ts_model):,}")
+
+        val_mse = train_ts_model(ts_model, train_loader, val_loader, args,
+                                 steps=args.full_train_steps,
+                                 prefix=f"[C{i+1}] ")
+        log.info(f"Candidate {i+1} val MSE: {val_mse:.6f}")
+
+        # Test evaluation
+        test_mse, test_mae = evaluate_ts(ts_model.to(args.device), test_loader, args)
+        log.info(f"Candidate {i+1} test MSE: {test_mse:.6f}  MAE: {test_mae:.6f}")
+        results.append((ind, val_mse, test_mse, test_mae))
+
+        torch.save({
+            "genome": ind.genome.flatten(),
+            "layer_classes": classes,
+            "model_state_dict": ts_model.state_dict(),
+            "val_mse": val_mse,
+            "test_mse": test_mse,
+            "test_mae": test_mae,
+            "params": ind.fitness.param_count,
+            "structure": args.ts_structure,
+            "dataset": args.ts_dataset,
+        }, out_dir / f"ts_candidate_{i+1}.pt")
+
+    results.sort(key=lambda x: x[1])
+    log.info(f"\n{'='*60}\nFinal TS results (sorted by val MSE):")
+    for rank, (ind, vmse, tmse, tmae) in enumerate(results):
+        log.info(f"  #{rank+1}  val_MSE={vmse:.6f}  test_MSE={tmse:.6f}  "
+                 f"test_MAE={tmae:.6f}  params={ind.fitness.param_count:,}")
+    log.info("=" * 60)
+    return results
+
+
+# ============================================================================
+# Quality Functions for NSGA-II
+# ============================================================================
+
+def _make_quality_fn(args, train_data, val_data):
+    """Quality function for LM NSGA: wraps backbone in STARLanguageModel."""
+    if getattr(args, "dry_run", False):
+        return None
+    evo_steps = getattr(args, "evolution_steps", 5000)
+    counter = [0]
+
+    def quality_fn(backbone, genome):
+        counter[0] += 1
+        lm = STARLanguageModel(backbone, args.vocab_size, args.dim)
+        n = count_params(lm)
+        log.info(f"[Eval #{counter[0]}] {n:,} params, {evo_steps} steps")
+        ppl = train_model(lm, train_data, val_data, args,
+                          steps=evo_steps, prefix=f"[E{counter[0]}] ")
+        log.info(f"[Eval #{counter[0]}] PPL={ppl:.2f}")
+        return ppl
+
+    return quality_fn
+
+
+def _make_detect_quality_fn(args, train_data, val_data):
+    """Quality function for detection NSGA: wraps backbone in detector."""
+    if getattr(args, "dry_run", False):
+        return None
+    evo_steps = getattr(args, "evolution_steps", 500)
+    counter = [0]
+
+    def quality_fn(backbone, genome):
+        counter[0] += 1
+        det = STARVisionDetector(
+            backbone, args.num_classes, args.dim,
+            img_size=args.img_size, patch_size=args.patch_size,
+        )
+        n = count_params(det)
+        log.info(f"[DetEval #{counter[0]}] {n:,} params, {evo_steps} steps")
+        val_loss = train_detector(det, train_data, val_data, args,
+                                  steps=evo_steps, prefix=f"[DE{counter[0]}] ")
+        log.info(f"[DetEval #{counter[0]}] val_loss={val_loss:.4f}")
+        return val_loss
+
+    return quality_fn
+
+
+def _make_tidar_quality_fn(args, train_data, val_data):
+    """Quality function for TiDAR NSGA: wraps backbone in TiDARModel."""
+    if getattr(args, "dry_run", False):
+        return None
+    evo_steps = getattr(args, "evolution_steps", 5000)
+    counter = [0]
+
+    def quality_fn(backbone, genome):
+        counter[0] += 1
+        tidar = _build_tidar_from_backbone(backbone, args)
+        n = count_params(tidar)
+        log.info(f"[TiDAR-Eval #{counter[0]}] {n:,} params, {evo_steps} steps")
+        val_loss = train_tidar_model(tidar, train_data, val_data, args,
+                                     steps=evo_steps, prefix=f"[TE{counter[0]}] ")
+        log.info(f"[TiDAR-Eval #{counter[0]}] loss={val_loss:.4f}")
+        return val_loss
+
+    return quality_fn
+
+
+def _make_ts_quality_fn(args, train_loader, val_loader):
+    """Quality function for TS NSGA: wraps backbone in STARLIVTSModel."""
+    if getattr(args, "dry_run", False):
+        return None
+    evo_steps = getattr(args, "evolution_steps", 500)
+    counter = [0]
+
+    def quality_fn(backbone, genome):
+        counter[0] += 1
+        ts_model = _build_ts_from_backbone(backbone, args)
+        n = count_params(ts_model)
+        log.info(f"[TS-Eval #{counter[0]}] {n:,} params, {evo_steps} steps")
+        val_mse = train_ts_model(ts_model, train_loader, val_loader, args,
+                                 steps=evo_steps, prefix=f"[TSE{counter[0]}] ")
+        log.info(f"[TS-Eval #{counter[0]}] MSE={val_mse:.6f}")
+        return val_mse
+
+    return quality_fn
+
+
 # ============================================================================
 # CLI
 # ============================================================================
 
-def build_parser():
-    p = argparse.ArgumentParser(description="STAR Architecture Search + Training")
-    sub = p.add_subparsers(dest="mode", required=True)
-
-    # Shared arguments
+def _add_shared_args():
+    """Create shared argument parser for all modes."""
     shared = argparse.ArgumentParser(add_help=False)
     g_model = shared.add_argument_group("Model (Paper: 125M scale)")
     g_model.add_argument("--num_layers", type=int, default=24, help="LIV layers")
@@ -1037,114 +1553,164 @@ def build_parser():
     g_sys.add_argument("--seed", type=int, default=42)
     g_sys.add_argument("--out_dir", type=str, default="star_output")
 
-    # --- evolve ---
-    ep = sub.add_parser("evolve", parents=[shared],
-                        help="Run NSGA-II architecture search")
-    ep.add_argument("--evolution_steps", type=int, default=5000,
-                    help="Training steps per candidate (paper: 5000)")
-    ep.add_argument("--pop_size", type=int, default=DEFAULT_POP_SIZE)
-    ep.add_argument("--generations", type=int, default=DEFAULT_GENERATIONS)
-    ep.add_argument("--mutation_prob", type=float, default=DEFAULT_MUTATION_PROB)
-    ep.add_argument("--elitism", type=int, default=DEFAULT_ELITISM)
-    ep.add_argument("--crossover_points", type=int, default=DEFAULT_CROSSOVER_POINTS)
-    ep.add_argument("--tournament_k", type=int, default=DEFAULT_TOURNAMENT_K)
-    ep.add_argument("--include_extended", action="store_true")
-    ep.add_argument("--no_seeds", action="store_true")
-    ep.add_argument("--dry_run", action="store_true",
-                    help="Skip training; use param count as quality proxy")
+    return shared
 
-    # --- train ---
-    tp = sub.add_parser("train", parents=[shared],
-                        help="Train a specific genome")
-    tp.add_argument("--genome_path", type=str, required=True,
-                    help="JSON file from evolution checkpoint")
-    tp.add_argument("--train_steps", type=int, default=20_000)
 
-    # --- both ---
-    bp = sub.add_parser("both", parents=[shared],
-                        help="Evolve then train top-K")
-    bp.add_argument("--evolution_steps", type=int, default=5000)
-    bp.add_argument("--full_train_steps", type=int, default=20_000)
-    bp.add_argument("--top_k", type=int, default=8,
-                    help="Post-evolution: train top-K candidates (paper: 8)")
-    bp.add_argument("--pop_size", type=int, default=DEFAULT_POP_SIZE)
-    bp.add_argument("--generations", type=int, default=DEFAULT_GENERATIONS)
-    bp.add_argument("--mutation_prob", type=float, default=DEFAULT_MUTATION_PROB)
-    bp.add_argument("--elitism", type=int, default=DEFAULT_ELITISM)
-    bp.add_argument("--crossover_points", type=int, default=DEFAULT_CROSSOVER_POINTS)
-    bp.add_argument("--tournament_k", type=int, default=DEFAULT_TOURNAMENT_K)
-    bp.add_argument("--include_extended", action="store_true")
-    bp.add_argument("--no_seeds", action="store_true")
-    bp.add_argument("--dry_run", action="store_true")
+def _add_evolution_args(parser):
+    """Add evolution-specific arguments to a parser."""
+    parser.add_argument("--evolution_steps", type=int, default=5000,
+                        help="Training steps per candidate (paper: 5000)")
+    parser.add_argument("--pop_size", type=int, default=DEFAULT_POP_SIZE)
+    parser.add_argument("--generations", type=int, default=DEFAULT_GENERATIONS)
+    parser.add_argument("--mutation_prob", type=float, default=DEFAULT_MUTATION_PROB)
+    parser.add_argument("--elitism", type=int, default=DEFAULT_ELITISM)
+    parser.add_argument("--crossover_points", type=int, default=DEFAULT_CROSSOVER_POINTS)
+    parser.add_argument("--tournament_k", type=int, default=DEFAULT_TOURNAMENT_K)
+    parser.add_argument("--include_extended", action="store_true")
+    parser.add_argument("--no_seeds", action="store_true")
+    parser.add_argument("--dry_run", action="store_true",
+                        help="Skip training; use param count as quality proxy")
 
-    # --- Detection shared args ---
+
+def _add_detection_args():
+    """Create detection-specific argument parser."""
     det_shared = argparse.ArgumentParser(add_help=False)
     g_det = det_shared.add_argument_group("Detection")
     g_det.add_argument("--det_dataset", type=str, default="voc",
                        choices=["voc", "coco"], help="Detection dataset")
     g_det.add_argument("--det_root", type=str, default="./data",
                        help="Dataset root directory")
-    g_det.add_argument("--det_year", type=str, default="2007",
-                       help="VOC year (2007 or 2012)")
-    g_det.add_argument("--det_split", type=str, default="trainval",
-                       help="VOC training split")
-    g_det.add_argument("--det_val_split", type=str, default="test",
-                       help="VOC validation split")
-    g_det.add_argument("--det_ann", type=str, default=None,
-                       help="COCO train annotation JSON path")
-    g_det.add_argument("--det_val_ann", type=str, default=None,
-                       help="COCO val annotation JSON path")
-    g_det.add_argument("--det_val_root", type=str, default=None,
-                       help="COCO val images directory (if different from det_root)")
-    g_det.add_argument("--max_det_images", type=int, default=None,
-                       help="Max images to load (for quick tests)")
-    g_det.add_argument("--img_size", type=int, default=224,
-                       help="Input image size")
-    g_det.add_argument("--patch_size", type=int, default=16,
-                       help="Patch size for vision detector")
-    g_det.add_argument("--num_classes", type=int, default=None,
-                       help="Number of classes (auto-detected from dataset)")
-    g_det.add_argument("--det_batch_size", type=int, default=8,
-                       help="Total images per optimizer step")
+    g_det.add_argument("--det_year", type=str, default="2007")
+    g_det.add_argument("--det_split", type=str, default="trainval")
+    g_det.add_argument("--det_val_split", type=str, default="test")
+    g_det.add_argument("--det_ann", type=str, default=None)
+    g_det.add_argument("--det_val_ann", type=str, default=None)
+    g_det.add_argument("--det_val_root", type=str, default=None)
+    g_det.add_argument("--max_det_images", type=int, default=None)
+    g_det.add_argument("--img_size", type=int, default=224)
+    g_det.add_argument("--patch_size", type=int, default=16)
+    g_det.add_argument("--num_classes", type=int, default=None)
+    g_det.add_argument("--det_batch_size", type=int, default=8)
+    return det_shared
 
-    # --- detect-evolve ---
+
+def _add_tidar_args():
+    """Create TiDAR-specific argument parser."""
+    tidar_shared = argparse.ArgumentParser(add_help=False)
+    g_tidar = tidar_shared.add_argument_group("TiDAR")
+    g_tidar.add_argument("--tidar_alpha", type=float, default=1.0,
+                         help="Loss balance: L = 1/(1+α) * [α * L_AR + L_Diff]")
+    g_tidar.add_argument("--num_heads", type=int, default=8,
+                         help="Number of attention heads for TiDAR backbone")
+    return tidar_shared
+
+
+def _add_ts_args():
+    """Create time series-specific argument parser."""
+    ts_shared = argparse.ArgumentParser(add_help=False)
+    g_ts = ts_shared.add_argument_group("Time Series")
+    g_ts.add_argument("--ts_dataset", type=str, default="ETTh1",
+                      help="Dataset name (ETTh1, ETTh2, ETTm1, ETTm2, "
+                           "Electricity, Traffic, Exchange, Weather, ILI)")
+    g_ts.add_argument("--ts_seq_len", type=int, default=96,
+                      help="Lookback window length")
+    g_ts.add_argument("--ts_pred_len", type=int, default=96,
+                      help="Forecast horizon length")
+    g_ts.add_argument("--ts_structure", type=str, default="itransformer",
+                      choices=["dmamba", "smamba", "itransformer"],
+                      help="Model structure approach")
+    g_ts.add_argument("--ts_batch_size", type=int, default=32,
+                      help="Batch size for time series training")
+    g_ts.add_argument("--ts_num_workers", type=int, default=4,
+                      help="DataLoader workers")
+    return ts_shared
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        description="STAR + TiDAR: Architecture Search + Training")
+    sub = p.add_subparsers(dest="mode", required=True)
+
+    shared = _add_shared_args()
+    det_shared = _add_detection_args()
+    tidar_shared = _add_tidar_args()
+    ts_shared = _add_ts_args()
+
+    # --- LM: evolve ---
+    ep = sub.add_parser("evolve", parents=[shared],
+                        help="Run NSGA-II architecture search (LM)")
+    _add_evolution_args(ep)
+
+    # --- LM: train ---
+    tp = sub.add_parser("train", parents=[shared],
+                        help="Train a specific genome (LM)")
+    tp.add_argument("--genome_path", type=str, required=True)
+    tp.add_argument("--train_steps", type=int, default=20_000)
+
+    # --- LM: both ---
+    bp = sub.add_parser("both", parents=[shared],
+                        help="Evolve then train top-K (LM)")
+    _add_evolution_args(bp)
+    bp.add_argument("--full_train_steps", type=int, default=20_000)
+    bp.add_argument("--top_k", type=int, default=8)
+
+    # --- Detection: detect-evolve ---
     dep = sub.add_parser("detect-evolve", parents=[shared, det_shared],
-                         help="NSGA-II architecture search for object detection")
-    dep.add_argument("--evolution_steps", type=int, default=500)
-    dep.add_argument("--pop_size", type=int, default=DEFAULT_POP_SIZE)
-    dep.add_argument("--generations", type=int, default=DEFAULT_GENERATIONS)
-    dep.add_argument("--mutation_prob", type=float, default=DEFAULT_MUTATION_PROB)
-    dep.add_argument("--elitism", type=int, default=DEFAULT_ELITISM)
-    dep.add_argument("--crossover_points", type=int, default=DEFAULT_CROSSOVER_POINTS)
-    dep.add_argument("--tournament_k", type=int, default=DEFAULT_TOURNAMENT_K)
-    dep.add_argument("--include_extended", action="store_true")
-    dep.add_argument("--no_seeds", action="store_true")
-    dep.add_argument("--dry_run", action="store_true",
-                     help="Skip training; use param count as quality proxy")
+                         help="NSGA-II architecture search for detection")
+    _add_evolution_args(dep)
+    dep.set_defaults(evolution_steps=500)
 
-    # --- detect-train ---
+    # --- Detection: detect-train ---
     dtp = sub.add_parser("detect-train", parents=[shared, det_shared],
                          help="Train a specific genome for detection")
-    dtp.add_argument("--genome_path", type=str, required=True,
-                     help="JSON file from evolution checkpoint")
+    dtp.add_argument("--genome_path", type=str, required=True)
     dtp.add_argument("--train_steps", type=int, default=5000)
 
-    # --- detect-both ---
+    # --- Detection: detect-both ---
     dbp = sub.add_parser("detect-both", parents=[shared, det_shared],
                          help="Evolve + train top-K for detection")
-    dbp.add_argument("--evolution_steps", type=int, default=500)
+    _add_evolution_args(dbp)
+    dbp.set_defaults(evolution_steps=500)
     dbp.add_argument("--full_train_steps", type=int, default=5000)
-    dbp.add_argument("--top_k", type=int, default=4,
-                     help="Post-evolution: train top-K candidates")
-    dbp.add_argument("--pop_size", type=int, default=DEFAULT_POP_SIZE)
-    dbp.add_argument("--generations", type=int, default=DEFAULT_GENERATIONS)
-    dbp.add_argument("--mutation_prob", type=float, default=DEFAULT_MUTATION_PROB)
-    dbp.add_argument("--elitism", type=int, default=DEFAULT_ELITISM)
-    dbp.add_argument("--crossover_points", type=int, default=DEFAULT_CROSSOVER_POINTS)
-    dbp.add_argument("--tournament_k", type=int, default=DEFAULT_TOURNAMENT_K)
-    dbp.add_argument("--include_extended", action="store_true")
-    dbp.add_argument("--no_seeds", action="store_true")
-    dbp.add_argument("--dry_run", action="store_true")
+    dbp.add_argument("--top_k", type=int, default=4)
+
+    # --- TiDAR: tidar-evolve ---
+    tep = sub.add_parser("tidar-evolve", parents=[shared, tidar_shared],
+                         help="NSGA-II architecture search with TiDAR objective")
+    _add_evolution_args(tep)
+
+    # --- TiDAR: tidar-train ---
+    ttp = sub.add_parser("tidar-train", parents=[shared, tidar_shared],
+                         help="Train a specific genome with TiDAR")
+    ttp.add_argument("--genome_path", type=str, required=True)
+    ttp.add_argument("--train_steps", type=int, default=20_000)
+
+    # --- TiDAR: tidar-both ---
+    tbp = sub.add_parser("tidar-both", parents=[shared, tidar_shared],
+                         help="Evolve + train top-K with TiDAR")
+    _add_evolution_args(tbp)
+    tbp.add_argument("--full_train_steps", type=int, default=20_000)
+    tbp.add_argument("--top_k", type=int, default=8)
+
+    # --- TS: ts-evolve ---
+    tsep = sub.add_parser("ts-evolve", parents=[shared, ts_shared],
+                          help="NSGA-II architecture search for time series")
+    _add_evolution_args(tsep)
+    tsep.set_defaults(evolution_steps=500)
+
+    # --- TS: ts-train ---
+    tstp = sub.add_parser("ts-train", parents=[shared, ts_shared],
+                          help="Train a specific genome for time series")
+    tstp.add_argument("--genome_path", type=str, required=True)
+    tstp.add_argument("--train_steps", type=int, default=10_000)
+
+    # --- TS: ts-both ---
+    tsbp = sub.add_parser("ts-both", parents=[shared, ts_shared],
+                          help="Evolve + train top-K for time series")
+    _add_evolution_args(tsbp)
+    tsbp.set_defaults(evolution_steps=500)
+    tsbp.add_argument("--full_train_steps", type=int, default=10_000)
+    tsbp.add_argument("--top_k", type=int, default=8)
 
     return p
 
@@ -1163,25 +1729,6 @@ def _get_seeds(args):
     ]
 
 
-def _make_quality_fn(args, train_data, val_data):
-    if getattr(args, "dry_run", False):
-        return None
-    evo_steps = getattr(args, "evolution_steps", 5000)
-    counter = [0]
-
-    def quality_fn(backbone, genome):
-        counter[0] += 1
-        lm = STARLanguageModel(backbone, args.vocab_size, args.dim)
-        n = count_params(lm)
-        log.info(f"[Eval #{counter[0]}] {n:,} params, {evo_steps} steps")
-        ppl = train_model(lm, train_data, val_data, args,
-                          steps=evo_steps, prefix=f"[E{counter[0]}] ")
-        log.info(f"[Eval #{counter[0]}] PPL={ppl:.2f}")
-        return ppl
-
-    return quality_fn
-
-
 def main():
     args = build_parser().parse_args()
 
@@ -1192,9 +1739,8 @@ def main():
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
-    # --- Detection modes ---
+    # ── Detection modes ──
     if args.mode.startswith("detect-"):
-        # Set seq_len to num_patches for KV cache estimation
         args.seq_len = (args.img_size // args.patch_size) ** 2
         train_det, val_det = load_detection_data(args)
 
@@ -1241,7 +1787,129 @@ def main():
 
         return
 
-    # --- Language model modes ---
+    # ── TiDAR modes ──
+    if args.mode.startswith("tidar-"):
+        train_data, val_data = load_data(args)
+
+        if args.mode == "tidar-evolve":
+            qfn = _make_tidar_quality_fn(args, train_data, val_data)
+            population, pool = evolve_with_seeds(args, qfn, _get_seeds(args))
+
+            pf = [p for p in population if p.rank == 0]
+            log.info(f"\nTiDAR evolution complete. Pareto front: {len(pf)}")
+            for i, ind in enumerate(pf):
+                cls = [g.liv_class for g in ind.genome.layers]
+                log.info(f"  [{i}] q={ind.fitness.quality:.4f} "
+                         f"p={ind.fitness.param_count:,}  classes={cls}")
+
+        elif args.mode == "tidar-train":
+            genome = load_genome(args.genome_path, args.num_layers)
+            pool = build_class_pool()
+            backbone = GenomeModelBuilder(pool, args.dim).build(genome)
+            tidar = _build_tidar_from_backbone(backbone, args)
+            log.info(f"TiDAR params: {count_params(tidar):,}")
+
+            val_loss = train_tidar_model(
+                tidar, train_data, val_data, args, steps=args.train_steps)
+            log.info(f"Final TiDAR loss: {val_loss:.4f}")
+
+            out = Path(args.out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                "genome": genome.flatten(),
+                "model_state_dict": tidar.state_dict(),
+                "tidar_loss": val_loss,
+            }, out / "trained_tidar.pt")
+
+        elif args.mode == "tidar-both":
+            qfn = _make_tidar_quality_fn(args, train_data, val_data)
+            population, pool = evolve_with_seeds(args, qfn, _get_seeds(args))
+            post_tidar_train(population, pool, train_data, val_data, args)
+
+        return
+
+    # ── Time series modes ──
+    if args.mode.startswith("ts-"):
+        # Load time series data
+        info = get_dataset_info(args.ts_dataset)
+        if not info.get("exists"):
+            raise FileNotFoundError(
+                f"Dataset '{args.ts_dataset}' not found. Run ./download_data.sh")
+        args.n_variates = info["n_variates"]
+        log.info(f"TS dataset: {args.ts_dataset}  variates={args.n_variates}  "
+                 f"structure={args.ts_structure}  seq={args.ts_seq_len}  pred={args.ts_pred_len}")
+
+        train_loader, val_loader, test_loader, ts_scaler = get_dataloader(
+            dataset=args.ts_dataset,
+            seq_len=args.ts_seq_len,
+            pred_len=args.ts_pred_len,
+            batch_size=args.ts_batch_size,
+            num_workers=args.ts_num_workers,
+        )
+
+        # For inverted approaches (smamba/itransformer), backbone processes
+        # variate tokens (C tokens) → causal=False.
+        # For dmamba, backbone processes temporal sequence → causal=True.
+        causal = (args.ts_structure == 'dmamba')
+
+        # Set seq_len for KV cache estimation in NSGA
+        # dmamba: backbone sees seq_len temporal tokens
+        # smamba/itransformer: backbone sees n_variates tokens
+        if causal:
+            args.seq_len = args.ts_seq_len
+        else:
+            args.seq_len = args.n_variates
+
+        if args.mode == "ts-evolve":
+            qfn = _make_ts_quality_fn(args, train_loader, val_loader)
+            population, pool = evolve_with_seeds(
+                args, qfn, _get_seeds(args), causal=causal)
+
+            pf = [p for p in population if p.rank == 0]
+            log.info(f"\nTS evolution complete. Pareto front: {len(pf)}")
+            for i, ind in enumerate(pf):
+                cls = [g.liv_class for g in ind.genome.layers]
+                log.info(f"  [{i}] q={ind.fitness.quality:.6f} "
+                         f"p={ind.fitness.param_count:,}  classes={cls}")
+
+        elif args.mode == "ts-train":
+            genome = load_genome(args.genome_path, args.num_layers)
+            pool = build_class_pool()
+            backbone = GenomeModelBuilder(pool, args.dim, causal=causal).build(genome)
+            ts_model = _build_ts_from_backbone(backbone, args)
+            log.info(f"TS params: {count_params(ts_model):,}")
+
+            val_mse = train_ts_model(
+                ts_model, train_loader, val_loader, args, steps=args.train_steps)
+
+            # Test evaluation
+            test_mse, test_mae = evaluate_ts(
+                ts_model.to(args.device), test_loader, args)
+            log.info(f"Final val MSE: {val_mse:.6f}")
+            log.info(f"Final test MSE: {test_mse:.6f}  MAE: {test_mae:.6f}")
+
+            out = Path(args.out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                "genome": genome.flatten(),
+                "model_state_dict": ts_model.state_dict(),
+                "val_mse": val_mse,
+                "test_mse": test_mse,
+                "test_mae": test_mae,
+                "structure": args.ts_structure,
+                "dataset": args.ts_dataset,
+            }, out / "trained_ts.pt")
+
+        elif args.mode == "ts-both":
+            qfn = _make_ts_quality_fn(args, train_loader, val_loader)
+            population, pool = evolve_with_seeds(
+                args, qfn, _get_seeds(args), causal=causal)
+            post_ts_train(population, pool, train_loader, val_loader,
+                          test_loader, args)
+
+        return
+
+    # ── Language model modes ──
     train_data, val_data = load_data(args)
 
     if args.mode == "evolve":

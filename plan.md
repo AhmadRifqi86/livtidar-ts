@@ -685,40 +685,66 @@ genome_D = {
 
 ## 9. Implementation Plan
 
-### Phase 1: Data Pipeline (Week 1)
-- [ ] Download datasets via `download_data.sh`
-- [ ] Implement `TimeSeriesDataset` class with:
-  - Sliding window sampling
-  - Train/val/test split (0.7/0.1/0.2 standard)
-  - RevIN normalization
-  - Configurable lookback (L) and horizon (H)
+### Current Code Status
 
-### Phase 2: Structural Templates (Week 2-3)
-- [ ] Implement Approach A: `DMambaLIV` (decomposition + dual flow)
-- [ ] Implement Approach B: `SMambaLIV` (variate-first + temporal)
-- [ ] Implement Approach C: `iTransformerLIV` (inverted variate tokens)
-- [ ] Implement Approach D: `HybridLIV` (decomposition + inverted)
-- [ ] Each template uses LIV blocks from existing `liv.py` as drop-in components
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `core/liv.py` — LIV framework | ✅ Done | All featurizers, token/channel mixing, static W |
+| `core/nsga.py` — NSGA-II | ✅ Done | 3+1 objectives, `--include_extended`, `--measure_latency` |
+| `core/modeldef.py` — TS models | ✅ Done | DMamba / S-Mamba / iTransformer + RevIN + EMA |
+| `core/tidar.py` — TiDAR-TS | ✅ Done | RevIN, draft + AR refinement, joint loss |
+| `src/dataload.py` — data pipeline | ✅ Done | All 7 datasets, sliding window, standard splits |
+| `src/train.py` — training pipeline | ✅ Done | ts-evolve/train/both + ts-tidar-* modes |
+| Rec-3 / Rec-4 (CfC) — classes 18-21 | ✅ Done | `--include_extended` wired to all TS parsers |
+| Baseline training scripts | ❌ Pending | DMamba, S-Mamba, iTransformer, PatchTST, DLinear |
+| Experiment runner scripts | ❌ Pending | Exp 1-5, result collection, Pareto plot generation |
 
-### Phase 3: CfC LIV Operator (Week 3)
-- [ ] Add CfC as new LIV class (class 18-21) in `liv.py`
-- [ ] Verify CfC works in both causal and non-causal modes
-- [ ] Unit test against reference CfC implementation
+---
 
-### Phase 4: Time Series Genome + NSGA-2 (Week 4)
-- [ ] Extend `nsga.py` genome encoding for time series slots
-- [ ] Fitness function: MSE on validation set + param count
-- [ ] Quick-eval protocol: short training → MSE measurement
+### Timeline (Remaining Work)
 
-### Phase 5: TiDAR Adaptation (Week 5)
-- [ ] Implement parallel draft prediction head
-- [ ] Implement optional AR refinement pass
-- [ ] Structured attention mask for forecast tokens
+> Note: the experiment list (§8) is volatile — new experiments may be added as results emerge. The timeline below covers what is currently planned; buffer weeks absorb additions.
 
-### Phase 6: Experiments + Paper (Week 6-8)
-- [ ] Run all experiments (Exp 1-5)
-- [ ] Generate tables and figures
-- [ ] Write paper
+```
+Week 1  ── Baseline Scripts
+            Implement thin wrappers to train + evaluate baselines on all datasets:
+            DMamba, S-Mamba, iTransformer (using STARLIVTSModel with fixed genomes),
+            PatchTST, DLinear (external implementations or re-implemented).
+            Target: reproduce reported MSE numbers ±2% on ETTh1.
+
+Week 2  ── Exp 1: Architecture Search (main result)
+            Run ts-evolve / ts-tidar-evolve on ETTh1 for all 3 structures
+            (dmamba, smamba, itransformer). Pop=16, Gen=12, 500 steps/candidate.
+            Log Pareto fronts (MSE vs params). Identify top-8 per approach.
+
+Week 3  ── Exp 1 cont.: Full Training of Top Genomes
+            Train top-8 per approach for 10K+ steps on ETTh1.
+            Evaluate on ETTh1, ETTh2, ETTm1, ETTm2 (standard TS benchmarks).
+
+Week 4  ── Exp 2 + Exp 3
+            Exp 2: Operator ablation — fix Approach A, manually set all-SSM /
+                   all-CfC / all-Conv / all-Attention and compare vs GA-found mix.
+            Exp 3: CfC vs SSM head-to-head — same structure, swap Rec-1 ↔ Rec-4,
+                   focus on irregular-interval datasets (Weather, ILI).
+
+Week 5  ── Exp 4 + Exp 5
+            Exp 4: TiDAR speedup — compare draft (ar_steps=0) vs AR-refined
+                   (ar_steps=k) wall-clock time for H=720 on Traffic.
+            Exp 5: Cross-dataset generalization — take best genome from ETTh1
+                   search, evaluate zero-shot on Electricity, Traffic, Exchange.
+
+Week 6  ── Buffer / Additional Experiments
+            Handle any new experiments added during Weeks 2-5.
+            Re-run failed/inconclusive cases. Collect all results into tables.
+
+Week 7  ── Analysis + Figures
+            Pareto front plots, operator-frequency heatmaps, speedup curves,
+            ablation bar charts, cross-dataset transfer heatmap.
+
+Week 8  ── Paper Writing
+            Write §1 intro, §3 method, §4 experiments, §5 conclusion.
+            Sections §2 (background) and §6 (related work) drafted in parallel.
+```
 
 ---
 

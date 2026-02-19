@@ -14,6 +14,7 @@ and feature-group sharing group/strategy (B, C, S, V bitmask).
 import copy
 import math
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -399,6 +400,8 @@ class FitnessResult:
     quality: float       # Obj 1: PPL/loss (lower is better)
     param_count: int     # Obj 2: trainable parameter count
     kv_cache_size: int   # Obj 3: inference cache/state estimate (bytes-like)
+    latency_ms: float = 0.0  # Obj 4 (optional): backbone forward latency in ms
+                              # 0.0 means not measured — excluded from dominance
 
 
 def count_params(model: nn.Module) -> int:
@@ -462,12 +465,32 @@ class FitnessEvaluator:
 
     def __init__(self, class_pool: Dict[int, LIVClassSpec], dim: int,
                  quality_fn: Optional[Callable] = None,
-                 seq_len: int = 1024, **build_kwargs):
+                 seq_len: int = 1024,
+                 measure_latency: bool = False,
+                 latency_warmup: int = 3,
+                 latency_runs: int = 10,
+                 **build_kwargs):
         self.class_pool = class_pool
         self.dim = dim
         self.quality_fn = quality_fn
         self.seq_len = seq_len
+        self.measure_latency = measure_latency
+        self.latency_warmup = latency_warmup
+        self.latency_runs = latency_runs
         self.builder = GenomeModelBuilder(class_pool, dim, **build_kwargs)
+
+    def _measure_latency(self, model: nn.Module) -> float:
+        """Time a single-sample backbone forward pass (ms). CPU-only for fairness."""
+        model.eval()
+        x = torch.randn(1, self.seq_len, self.dim)
+        with torch.no_grad():
+            for _ in range(self.latency_warmup):
+                model(x)
+            t0 = time.perf_counter()
+            for _ in range(self.latency_runs):
+                model(x)
+        model.train()
+        return (time.perf_counter() - t0) / self.latency_runs * 1000.0
 
     def evaluate(self, genome: Genome) -> FitnessResult:
         """Compute all fitness objectives for a genome."""
@@ -483,10 +506,13 @@ class FitnessEvaluator:
             # Without training, use param count as a proxy
             quality = float(param_c)
 
+        latency = self._measure_latency(model) if self.measure_latency else 0.0
+
         return FitnessResult(
             quality=quality,
             param_count=param_c,
             kv_cache_size=kv_cache,
+            latency_ms=latency,
         )
 
 
@@ -504,9 +530,15 @@ class Individual:
 
 
 def _dominates(a: FitnessResult, b: FitnessResult) -> bool:
-    """True if a dominates b (no worse in all objectives, strictly better in >=1)."""
-    objs_a = (a.quality, a.param_count, a.kv_cache_size)
-    objs_b = (b.quality, b.param_count, b.kv_cache_size)
+    """True if a dominates b (no worse in all objectives, strictly better in >=1).
+
+    latency_ms is included as a 4th objective only when measured (> 0 in either).
+    """
+    objs_a = [a.quality, a.param_count, a.kv_cache_size]
+    objs_b = [b.quality, b.param_count, b.kv_cache_size]
+    if a.latency_ms > 0 or b.latency_ms > 0:
+        objs_a.append(a.latency_ms)
+        objs_b.append(b.latency_ms)
     no_worse = all(oa <= ob for oa, ob in zip(objs_a, objs_b))
     strictly_better = any(oa < ob for oa, ob in zip(objs_a, objs_b))
     return no_worse and strictly_better
@@ -568,12 +600,14 @@ def crowding_distance(population: List[Individual],
     for idx in front_indices:
         population[idx].crowding_distance = 0.0
 
-    # For each objective
+    # For each objective (latency added when measured in any individual in front)
     objectives = [
         lambda ind: ind.fitness.quality,
         lambda ind: float(ind.fitness.param_count),
         lambda ind: float(ind.fitness.kv_cache_size),
     ]
+    if any(population[i].fitness.latency_ms > 0 for i in front_indices):
+        objectives.append(lambda ind: ind.fitness.latency_ms)
 
     for obj_fn in objectives:
         sorted_idx = sorted(front_indices, key=lambda i: obj_fn(population[i]))

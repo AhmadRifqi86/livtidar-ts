@@ -38,6 +38,7 @@ from core.liv import (
     STARBackbone, SparsityType,
     TokenMixType, ChannelMixType,
 )
+from core.modeldef import RevIN
 
 
 # =============================================================================
@@ -240,6 +241,9 @@ class TiDARTSModel(nn.Module):
         super().__init__()
         self.config = config
 
+        # RevIN: instance normalization over variates (same as STARLIVTSModel)
+        self.revin = RevIN(config.n_variates)
+
         # Input projection: embed each timestep (C → D)
         self.input_proj = nn.Linear(config.n_variates, config.dim)
 
@@ -287,22 +291,22 @@ class TiDARTSModel(nn.Module):
             return x
         return self.backbone(x, clean_len=clean_len)
 
-    def forward(self, x: torch.Tensor):
-        """Forward with [lookback | forecast_mask] layout.
+    def _forward_core(self, x_norm: torch.Tensor):
+        """Core forward on already-normalized input. Returns preds in normalized space.
 
         Args:
-            x: (B, L, C) lookback window (clean timesteps)
+            x_norm: (B, L, C) RevIN-normalized lookback
 
         Returns:
-            ar_pred:   (B, L-1, C) — next-step predictions from lookback section
-            diff_pred: (B, H, C)   — forecast from mask section (draft output)
+            ar_pred:   (B, L-1, C) normalized next-step predictions
+            diff_pred: (B, H, C)   normalized forecast (draft output)
         """
-        B, L, C = x.shape
+        B, L, C = x_norm.shape
         H = self.config.pred_len
-        device = x.device
+        device = x_norm.device
 
         # ── Embed lookback: (B, L, D) ──
-        clean_emb = self.input_proj(x)
+        clean_emb = self.input_proj(x_norm)
 
         # ── Forecast mask tokens: (B, H, D) ──
         mask_emb = self.mask_emb.expand(B, H, -1)
@@ -313,8 +317,6 @@ class TiDARTSModel(nn.Module):
         combined = combined + self.pos_emb(pos_ids)
 
         # ── LIV backbone with hybrid mask (clean_len=L) ──
-        # Handle both STARBackbone (accepts clean_len kwarg) and
-        # nn.Sequential (returned by GenomeModelBuilder — must iterate manually).
         out = self._forward_backbone(combined, clean_len=L)
         out = self.norm(out)
 
@@ -327,41 +329,58 @@ class TiDARTSModel(nn.Module):
 
         return ar_pred, diff_pred
 
-    @torch.no_grad()
-    def forecast(self, x: torch.Tensor, ar_steps: int = 0) -> torch.Tensor:
-        """Inference: draft all H steps, optionally refine with AR.
+    def forward(self, x: torch.Tensor):
+        """Forward with RevIN normalization + [lookback | forecast_mask] layout.
 
         Args:
-            x:        (B, L, C) lookback window
+            x: (B, L, C) lookback window (raw, unnormalized)
+
+        Returns:
+            ar_pred:   (B, L-1, C) — next-step predictions (normalized space)
+            diff_pred: (B, H, C)   — forecast draft (normalized space)
+
+        Note: outputs are in RevIN-normalized space. Use revin(out, mode='denorm')
+        to recover raw-scale predictions (done automatically in forecast()).
+        """
+        x_norm = self.revin(x, mode='norm')  # normalizes x, stores _mean/_stdev
+        return self._forward_core(x_norm)
+
+    @torch.no_grad()
+    def forecast(self, x: torch.Tensor, ar_steps: int = 0) -> torch.Tensor:
+        """Inference: draft all H steps in raw scale, optionally refine with AR.
+
+        Args:
+            x:        (B, L, C) lookback window (raw, unnormalized)
             ar_steps: number of leading steps to refine autoregressively
                       (0 = pure draft / fast mode; H = full AR / slow mode)
 
         Returns:
-            pred: (B, H, C) forecast
+            pred: (B, H, C) forecast in raw scale
         """
-        _, diff_pred = self(x)          # (B, H, C) — fast draft
+        # Draft: normalize input, run model, denorm output
+        _, diff_pred_norm = self(x)                          # stores revin stats for x
+        diff_pred = self.revin(diff_pred_norm, mode='denorm')  # (B, H, C) raw scale
 
         if ar_steps <= 0:
             return diff_pred
 
-        # AR refinement: slide a window of length seq_len along the horizon
-        # and overwrite the leading ar_steps draft predictions one at a time.
+        # AR refinement: slide a window along the horizon in raw space.
+        # Each self(window) call independently normalizes that window and
+        # stores fresh revin stats, so the subsequent denorm is consistent.
         B, L, C = x.shape
         H = self.config.pred_len
         ar_steps = min(ar_steps, H)
 
-        # Build a growing context buffer starting from the lookback window
-        ctx = x.clone()                 # (B, L, C)
-        refined = diff_pred.clone()     # (B, H, C) — will be updated in place
+        ctx = x.clone()                  # (B, L+t, C) grows in raw space
+        refined = diff_pred.clone()      # (B, H, C) — updated in place
 
         for t in range(ar_steps):
-            # Use the last seq_len timesteps as the lookback window
-            window = ctx[:, -L:]        # (B, L, C)
-            ar_pred, _ = self(window)   # (B, L-1, C)
-            # ar_pred[:, -1] predicts the next step after window[-1]
-            next_step = ar_pred[:, -1:] # (B, 1, C)
+            window = ctx[:, -L:]         # (B, L, C) raw window
+            ar_pred_norm, _ = self(window)           # normalizes window, stores stats
+            next_step_norm = ar_pred_norm[:, -1:]    # (B, 1, C) normalized
+            next_step = self.revin(next_step_norm, mode='denorm')  # raw scale
             refined[:, t:t+1] = next_step
-            ctx = torch.cat([ctx, next_step], dim=1)  # extend context
+            ctx = torch.cat([ctx, next_step], dim=1)  # extend context in raw space
 
         return refined
 
@@ -379,14 +398,21 @@ def compute_tidar_ts_loss(
 
     Args:
         model: TiDARTSModel
-        x:     (B, L, C) lookback window
-        y:     (B, H, C) ground-truth forecast
+        x:     (B, L, C) lookback window (raw scale)
+        y:     (B, H, C) ground-truth forecast (raw scale)
 
     Returns:
         (total_loss, ar_loss_scalar, diff_loss_scalar)
+
+    Loss is computed in raw scale (after RevIN denorm) so that MSE values are
+    directly comparable to baseline numbers reported in the literature.
     """
-    ar_pred, diff_pred = model(x)
+    ar_pred_norm, diff_pred_norm = model(x)   # model.revin now holds stats for x
     alpha = model.config.alpha
+
+    # Denorm predictions back to raw scale (uses stats stored by model(x))
+    ar_pred   = model.revin(ar_pred_norm,   mode='denorm')  # (B, L-1, C)
+    diff_pred = model.revin(diff_pred_norm, mode='denorm')  # (B, H, C)
 
     # AR: next-step prediction on lookback (predict x_{t+1} from x_t)
     ar_loss = F.mse_loss(ar_pred, x[:, 1:])

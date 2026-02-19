@@ -484,36 +484,56 @@ Output (B, H, C)
 
 ---
 
-## 5. CfC as New LIV Class
+## 5. Extended LIV Classes (Rec-3, Rec-4/CfC)
 
-CfC (Closed-form Continuous-time) is a natural addition to the LIV operator pool. It comes from the same Liquid AI group that created LIV.
+Two additional recurrence-family operators are implemented in `core/liv.py` under the `include_extended` flag. They extend the standard class pool (1–17) with classes 18–21.
 
-### CfC LIV Specification
+### Class 18 — Rec-3: Discretized SSM (S4-style)
 
 ```
-CfC operator:
-  Token mixing:  Time-continuous (semi-separable with continuous-time dynamics)
-  Channel mixing: Diagonal (each channel evolves independently)
+Featurizer10 + SEMI_SEPARABLE + DIAGONAL, expansion=16
 
-  State update (closed-form, no ODE solver):
-    h_t = σ(-τ_t · f(x_t)) ⊙ A_t + (1 - σ(-τ_t · f(x_t))) ⊙ B_t
+State update (discretized, Mamba/S4-style):
+  Δ_t  = softplus(W_dt(x_t))          — input-dependent step size
+  A_bar = exp(Δ_t · A_log)             — discretized state transition (A_log learnable)
+  B_bar = Δ_t · W_B(x_t)              — discretized input gate
+  C_t  = W_C(x_t)                     — output gate
 
-  Where:
-    f(x_t)  = learned feature extractor
-    τ_t     = input-dependent time constant
-    A_t, B_t = learned projections
-
-  Proposed genome encoding:
-    LIV class: 18 (CfC-1, standard)
-    LIV class: 19 (CfC-2, with backbone parameterization)
-    Differential variants: 20-21
+Key difference from Rec-1/Rec-2: explicit Δt discretization makes the
+state transition input-dependent in a physically principled way (ZOH).
 ```
 
-### Why CfC for Time Series
-- Native handling of **irregular time intervals** (unlike SSM which assumes uniform)
-- 100x faster than Neural ODE at inference
-- Naturally captures **continuous dynamics** in physical systems (weather, electricity)
-- Low parameter count with strong feature representation
+Genome encoding: class 18 = Rec-3, class 20 = Diff-Rec-3
+
+### Class 19 — Rec-4: CfC / Liquid Neural Network
+
+```
+Featurizer11 + SEMI_SEPARABLE + DIAGONAL, expansion=16
+
+State update (closed-form, complementary gating):
+  gate = σ(W_gate(x_t))
+  A_t  = gate                          — forget: how much state to retain
+  B_t  = (1 - gate) · g(x_t)          — input:  how much new input to absorb
+
+Key property: A + B_coefficient = 1 per element (complementary).
+This is the LIV implementation of CfC (Closed-form Continuous-time networks,
+Liquid AI). No ODE solver needed — the complementary gate IS the closed-form solution.
+```
+
+Genome encoding: class 19 = Rec-4 (CfC), class 21 = Diff-Rec-4
+
+### Summary
+
+| Class | Name | Featurizer | Key Mechanism | Differential |
+|-------|------|-----------|---------------|-------------|
+| 18 | Rec-3 | 10 | Δt-discretized SSM (S4/ZOH) | 20 |
+| 19 | Rec-4 (CfC) | 11 | Complementary gate A+B=1 | 21 |
+
+### Why CfC (Rec-4) for Time Series
+- Complementary gating naturally models **smooth continuous dynamics** (weather, electricity)
+- Unlike Rec-1/Rec-2 (fixed A), the forget gate is fully input-dependent
+- Low parameter count (no separate A_log parameter) with strong temporal representation
+- Works in both causal (DMamba temporal) and bidirectional (S-Mamba variate) modes
 
 ---
 
@@ -740,3 +760,4 @@ genome_D = {
 
 
 Note: Might exclude hybrid approach, focus on approach 1,2 and 3
+Endgoal: Adding TTT(test-time training) upon mistakes during diffusion drafting

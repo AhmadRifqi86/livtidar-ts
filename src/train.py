@@ -921,6 +921,7 @@ def evolve_with_seeds(args, quality_fn, seed_genomes=None, **evaluator_kwargs):
     class_pool = build_class_pool(getattr(args, "include_extended", False))
     evaluator = FitnessEvaluator(
         class_pool, args.dim, quality_fn, seq_len=args.seq_len,
+        measure_latency=getattr(args, "measure_latency", False),
         **evaluator_kwargs,
     )
     n_layers = args.num_layers
@@ -1406,7 +1407,10 @@ def _add_evolution_args(parser):
     parser.add_argument("--elitism", type=int, default=DEFAULT_ELITISM)
     parser.add_argument("--crossover_points", type=int, default=DEFAULT_CROSSOVER_POINTS)
     parser.add_argument("--tournament_k", type=int, default=DEFAULT_TOURNAMENT_K)
-    parser.add_argument("--include_extended", action="store_true")
+    parser.add_argument("--include_extended", action="store_true",
+                        help="Include Rec-3/Rec-4 (CfC) classes 18-21 in search")
+    parser.add_argument("--measure_latency", action="store_true",
+                        help="Measure backbone inference latency as 4th NSGA objective")
     parser.add_argument("--no_seeds", action="store_true")
     parser.add_argument("--dry_run", action="store_true",
                         help="Skip training; use param count as quality proxy")
@@ -1543,6 +1547,8 @@ def build_parser():
                           help="Train a specific genome for time series")
     tstp.add_argument("--genome_path", type=str, required=True)
     tstp.add_argument("--train_steps", type=int, default=10_000)
+    tstp.add_argument("--include_extended", action="store_true",
+                      help="Required if genome contains Rec-3/Rec-4 (classes 18-21)")
 
     # --- TS: ts-both ---
     tsbp = sub.add_parser("ts-both", parents=[shared, ts_shared],
@@ -1563,6 +1569,8 @@ def build_parser():
                           help="Train a specific genome with TiDAR-TS objective")
     tttp.add_argument("--genome_path", type=str, required=True)
     tttp.add_argument("--train_steps", type=int, default=10_000)
+    tttp.add_argument("--include_extended", action="store_true",
+                      help="Required if genome contains Rec-3/Rec-4 (classes 18-21)")
 
     # --- TiDAR-TS: ts-tidar-both ---
     ttbp = sub.add_parser("ts-tidar-both", parents=[shared, ts_shared, tidar_shared],

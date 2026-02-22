@@ -267,11 +267,10 @@ class EMADecomposition(nn.Module):
     def forward(self, x):
         """x: (B, L, C) → (seasonal, trend) each (B, L, C)"""
         alpha = torch.sigmoid(self.alpha)  # (C,) in [0,1]
-        B, L, C = x.shape
-        trend = torch.zeros_like(x)
-        trend[:, 0] = x[:, 0]
-        for t in range(1, L):
-            trend[:, t] = alpha * trend[:, t - 1] + (1 - alpha) * x[:, t]
+        steps = [x[:, 0]]
+        for t in range(1, x.shape[1]):
+            steps.append(alpha * steps[-1] + (1 - alpha) * x[:, t])
+        trend = torch.stack(steps, dim=1)  # (B, L, C) — no in-place ops
         seasonal = x - trend
         return seasonal, trend
 

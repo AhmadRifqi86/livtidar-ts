@@ -12,11 +12,14 @@ and feature-group sharing group/strategy (B, C, S, V bitmask).
 """
 
 import copy
+import logging
 import math
 import random
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 import torch
 import torch.nn as nn
@@ -512,13 +515,34 @@ class FitnessEvaluator:
                 latency_ms=0.0,
             )
 
-        if self.quality_fn is not None:
-            quality = self.quality_fn(model, genome)
-        else:
-            # Without training, use param count as a proxy
-            quality = float(param_c)
+        import gc
 
-        latency = self._measure_latency(model) if self.measure_latency else 0.0
+        try:
+            if self.quality_fn is not None:
+                quality = self.quality_fn(model, genome)
+            else:
+                # Without training, use param count as a proxy
+                quality = float(param_c)
+
+            latency = self._measure_latency(model) if self.measure_latency else 0.0
+
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            if "out of memory" in str(e).lower():
+                log.warning(
+                    f"OOM during evaluation (params={param_c:,}) — "
+                    "assigning penalty fitness. Freeing cache."
+                )
+                quality = float("inf")
+                latency = 0.0
+            else:
+                raise
+        finally:
+            # Always free the candidate model and optimizer states immediately.
+            # Without this, Python's GC defers collection and PyTorch's CUDA
+            # allocator caches grow candidate-by-candidate until OOM.
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
 
         return FitnessResult(
             quality=quality,

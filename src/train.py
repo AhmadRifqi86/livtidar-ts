@@ -922,6 +922,7 @@ def evolve_with_seeds(args, quality_fn, seed_genomes=None, **evaluator_kwargs):
     evaluator = FitnessEvaluator(
         class_pool, args.dim, quality_fn, seq_len=args.seq_len,
         measure_latency=getattr(args, "measure_latency", False),
+        max_params=getattr(args, "max_params", 0),
         **evaluator_kwargs,
     )
     n_layers = args.num_layers
@@ -1411,6 +1412,8 @@ def _add_evolution_args(parser):
                         help="Include Rec-3/Rec-4 (CfC) classes 18-21 in search")
     parser.add_argument("--measure_latency", action="store_true",
                         help="Measure backbone inference latency as 4th NSGA objective")
+    parser.add_argument("--max_params", type=int, default=0,
+                        help="Skip training candidates with more than this many params (0=no cap)")
     parser.add_argument("--no_seeds", action="store_true")
     parser.add_argument("--dry_run", action="store_true",
                         help="Skip training; use param count as quality proxy")

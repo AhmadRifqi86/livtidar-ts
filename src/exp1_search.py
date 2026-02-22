@@ -85,6 +85,7 @@ def make_args(
     tournament_k: int = DEFAULT_TOURNAMENT_K,
     include_extended: bool = False,
     measure_latency: bool = False,
+    max_params: int = 0,
     # full training
     full_train_steps: int = 10_000,
     top_k: int = 8,
@@ -124,6 +125,7 @@ def make_args(
         tournament_k=tournament_k,
         include_extended=include_extended,
         measure_latency=measure_latency,
+        max_params=max_params,
         # full training
         full_train_steps=full_train_steps,
         top_k=top_k,
@@ -266,6 +268,8 @@ def build_parser():
     p.add_argument("--include_extended", action="store_true",
                    help="Include Rec-3/Rec-4 (CfC) in search pool")
     p.add_argument("--measure_latency", action="store_true")
+    p.add_argument("--max_params", type=int, default=0,
+                   help="Skip training candidates with more than this many params (0=no cap)")
     p.add_argument("--no_seeds", action="store_true",
                    help="Start from random genomes (no hand-crafted seeds)")
 
@@ -316,6 +320,7 @@ def main():
                 evolution_steps=cli.evolution_steps,
                 include_extended=cli.include_extended,
                 measure_latency=cli.measure_latency,
+                max_params=cli.max_params,
                 full_train_steps=cli.full_train_steps,
                 top_k=cli.top_k,
                 lr=cli.lr,

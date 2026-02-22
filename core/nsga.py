@@ -469,6 +469,7 @@ class FitnessEvaluator:
                  measure_latency: bool = False,
                  latency_warmup: int = 3,
                  latency_runs: int = 10,
+                 max_params: int = 0,
                  **build_kwargs):
         self.class_pool = class_pool
         self.dim = dim
@@ -477,6 +478,7 @@ class FitnessEvaluator:
         self.measure_latency = measure_latency
         self.latency_warmup = latency_warmup
         self.latency_runs = latency_runs
+        self.max_params = max_params  # 0 = no cap
         self.builder = GenomeModelBuilder(class_pool, dim, **build_kwargs)
 
     def _measure_latency(self, model: nn.Module) -> float:
@@ -499,6 +501,16 @@ class FitnessEvaluator:
         param_c = count_params(model)
         kv_cache = estimate_kv_cache(genome, self.class_pool, self.dim,
                                      self.seq_len)
+
+        # Skip training for models that exceed the param cap — assign worst
+        # possible quality so NSGA-II naturally rejects them without OOM.
+        if self.max_params > 0 and param_c > self.max_params:
+            return FitnessResult(
+                quality=float("inf"),
+                param_count=param_c,
+                kv_cache_size=kv_cache,
+                latency_ms=0.0,
+            )
 
         if self.quality_fn is not None:
             quality = self.quality_fn(model, genome)

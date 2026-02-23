@@ -10,6 +10,8 @@ Helper modules:
   - RMSNorm, RevIN, EMADecomposition
 """
 
+from typing import List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -253,6 +255,20 @@ class RevIN(nn.Module):
             return x
 
 
+@torch.jit.script
+def _ema_scan(x: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+    """Causal EMA scan compiled to TorchScript to eliminate Python loop overhead.
+
+    trend[t] = alpha * trend[t-1] + (1 - alpha) * x[t]
+
+    x: (B, L, C), alpha: (C,) → trend: (B, L, C)
+    """
+    steps: List[torch.Tensor] = [x[:, 0]]
+    for t in range(1, x.shape[1]):
+        steps.append(alpha * steps[-1] + (1 - alpha) * x[:, t])
+    return torch.stack(steps, dim=1)
+
+
 class EMADecomposition(nn.Module):
     """EMA-based trend-seasonal decomposition (DMamba-style).
 
@@ -267,10 +283,7 @@ class EMADecomposition(nn.Module):
     def forward(self, x):
         """x: (B, L, C) → (seasonal, trend) each (B, L, C)"""
         alpha = torch.sigmoid(self.alpha)  # (C,) in [0,1]
-        steps = [x[:, 0]]
-        for t in range(1, x.shape[1]):
-            steps.append(alpha * steps[-1] + (1 - alpha) * x[:, t])
-        trend = torch.stack(steps, dim=1)  # (B, L, C) — no in-place ops
+        trend = _ema_scan(x, alpha)
         seasonal = x - trend
         return seasonal, trend
 

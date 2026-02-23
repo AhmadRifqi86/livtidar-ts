@@ -978,3 +978,119 @@ python -m src.exp1_search \
     --full_train_steps 500 \
     --top_k 3
 ```
+
+---
+
+## 13. Expected Experimental Results
+
+### Exp 2: Operator Ablation
+
+**Setup**: Fix `structure=dmamba`, compare ALL_SSM / ALL_CONV / ALL_ATTN / ALL_FFN / MIXED_GA / H96_FIXED on ETTh1.
+
+**Expected ranking (lower MSE = better)**
+
+Short horizons (H=96, 192):
+```
+MIXED_GA < ALL_CONV ≈ ALL_ATTN < ALL_SSM < ALL_FFN
+```
+- GConv-1 confirmed dominant for ETTh1 short-horizon (Exp 1 result)
+- Attention works well for trend; GA discovers the Conv+Attn combination
+- FFN has no token mixing — worst baseline, barely better than predicting mean
+
+Long horizons (H=336, 720):
+```
+MIXED_GA < ALL_SSM < ALL_ATTN < ALL_CONV < ALL_FFN
+```
+- SSM memory becomes critical; 3-tap GConv cannot reach weekly dependencies
+- Attention degrades with very long-range forecast targets
+- GA should discover SSM-dominant genomes when searched at long horizons
+
+**H96_FIXED variant** (short-horizon genome retrained at H=720):
+- At H=96: ≈ MIXED_GA (same genome, same horizon it was optimised for)
+- At H=720: degrades vs ALL_SSM → confirms GA architecture is horizon-specific
+- Directly answers: "Does the operator combination generalise across horizons?"
+
+**What would invalidate the experiment**:
+- ALL_FFN beats MIXED_GA → GA found something worse than no token mixing (bug or training failure)
+- All variants tie → operator choice is irrelevant for this dataset/budget
+
+---
+
+### Exp 3: CfC vs SSM Head-to-Head
+
+**Setup**: Fix structure and slots; swap all recurrent layers between Rec-1 (SSM) and Rec-4 (CfC). Keep Conv/Attn/FFN layers unchanged.
+
+**Expected results per dataset**
+
+| Dataset | Expected Winner | Key Reason |
+|---------|----------------|-----------|
+| ETTh1 / ETTh2 H=S | SSM | Regular hourly cycles; slow decay captures daily periodicity |
+| ETTh1 / ETTh2 H=L | SSM | Long-range trend; SSM accumulated state better than CfC reset |
+| ETTm1 / ETTm2 | SSM | Fine-grained 15-min data; smooth dynamics favour SSM |
+| Electricity | Tie or SSM | Regular load profiles; SSM marginal advantage |
+| Traffic | SSM | Complex spatial patterns need long-range memory |
+| Exchange | **CfC** | Daily financial rates; non-stationary regime shifts; CfC gate resets on policy changes |
+
+**Why CfC wins on Exchange**: The complementary gate `A + B = 1` means when a regime shift occurs (currency crisis, central bank action) the gate can set `A→0, B→1` — full state reset. SSM's `A ∈ (0,1)` decays slowly and carries stale state across regime boundaries.
+
+**Expected crossover pattern**: SSM wins broadly; CfC wins only where sudden discontinuities dominate. If CfC wins on ≥2 datasets, that confirms the inductive bias hypothesis.
+
+**What would invalidate the experiment**:
+- CfC never wins anywhere → systematic OOM/underfitting bias (internal_dim=16×256=4096 too large for budget)
+- CfC wins everywhere → either CfC is universally better (re-evaluate search pool) or training noise
+
+---
+
+### Exp 4: TiDAR Speedup
+
+**Setup**: Compare draft (`ar_steps=0`) vs partial-AR (`k=1,4,16`) vs full-AR (`ar_steps=H`) wall-clock time and MSE quality on ETTh1 H=720.
+
+**Expected speedup vs quality trade-off (H=720, RTX 4060)**
+
+| Mode | Estimated ms/sample | Speedup vs full-AR | MSE delta vs full-AR |
+|------|--------------------|--------------------|----------------------|
+| draft (k=0) | ~2–5 ms | 50–150× | +5–15% |
+| partial-AR k=1 | ~5–10 ms | 25–75× | +2–8% |
+| partial-AR k=4 | ~15–25 ms | 10–25× | +1–3% |
+| partial-AR k=16 | ~50–80 ms | 3–8× | ~0% |
+| full-AR (k=H) | ~300–500 ms | 1× | baseline |
+
+**Key finding expected**: Quality curve flattens fast — `k=4` captures ~97% of full-AR quality at 10–25× speedup. This is the practical sweet spot.
+
+**Horizon scaling**: Speedup scales with H. At H=96 the advantage is modest (~6×); at H=720 the advantage is large. The draft mode is most valuable for long-horizon forecasting.
+
+**What would invalidate the experiment**:
+- Draft MSE >30% worse than full-AR → TiDAR-TS draft head not learning to forecast
+- Speedup <5× at H=720 → bottleneck is not in the sequential AR pass (unexpected)
+
+---
+
+### Exp 5: Cross-Dataset Generalization
+
+**Setup**: Best genome from ETTh1 Exp 1. Two transfer modes: zero-shot (weights transferred) and architecture transfer (genome kept, weights retrained).
+
+**Zero-shot evaluation (no retraining, same-variate only)**
+
+| Source → Target | Expected MSE degradation | Reason |
+|----------------|------------------------|--------|
+| ETTh1 → ETTh2 | ~20–40% | Same 7 variates, similar hourly structure, different regime |
+| ETTh1 → ETTm1 | ~30–60% | Same variates but 15-min granularity; weights not aligned to faster scale |
+| ETTh1 → ETTm2 | ~30–60% | Same as ETTm1 |
+
+Zero-shot is a sanity check. If degradation is <10%, the operators generalise exceptionally well. If >80%, the architecture is over-specialised to ETTh1.
+
+**Architecture transfer (genome kept, weights trained from scratch on target)**
+
+| Source → Target | Searched vs Rec-1 Baseline | Expected |
+|----------------|--------------------------|---------|
+| ETTh1 → ETTh2 | Searched wins | Same ETT family; GConv+Attn pattern transfers |
+| ETTh1 → ETTm1/ETTm2 | Marginal win or tie | Different granularity limits but structure similar |
+| ETTh1 → Electricity | Rec-1 may win | 321 variates; GA searched for 7-variate structure; SSM-heavy genome better |
+| ETTh1 → Traffic | Rec-1 may win | 862 variates; structure mismatch even more extreme |
+| ETTh1 → Exchange | Tie or searched | Depends on whether CfC was discovered in Exp 1 genome |
+
+**Key insight**: Architecture transfer expected to hold within the same dataset family (ETT → ETT) but degrade for structurally different datasets (Traffic 862-variate, Exchange daily). A successful transfer within ETT family alone is meaningful — it shows the searched operators capture inductive biases beyond dataset-specific fitting.
+
+**What would invalidate the experiment**:
+- Rec-1 wins on all targets → architecture is ETTh1-specific and doesn't generalise at all
+- Searched wins on all targets including Traffic/Electricity → architecture is universally optimal (publish immediately)

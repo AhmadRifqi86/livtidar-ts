@@ -144,6 +144,7 @@ def run_ablation(
     structure: str,
     include_extended: bool,
     ga_genome_path: str,
+    h96_genome_path: str,
     train_steps: int,
     dim: int,
     num_layers: int,
@@ -194,7 +195,7 @@ def run_ablation(
         r.update({"dataset": dataset, "pred_len": pred_len, "structure": structure})
         results.append(r)
 
-    # GA-found MIXED variant
+    # GA-found MIXED variant (best genome for this specific horizon from Exp 1)
     if ga_genome_path:
         try:
             genome = load_genome_from_checkpoint(ga_genome_path, num_layers)
@@ -204,6 +205,18 @@ def run_ablation(
             results.append(r)
         except Exception as e:
             log.warning(f"Could not load GA genome from {ga_genome_path}: {e}")
+
+    # H=96 best genome retrained at current horizon — tests "does the short-horizon
+    # architecture generalise to longer horizons, or does SSM win at H=336/720?"
+    if h96_genome_path:
+        try:
+            genome = load_genome_from_checkpoint(h96_genome_path, num_layers)
+            repair(genome, pool)
+            r = run_variant("H96_FIXED", genome, pool, train_dl, val_dl, test_dl, args)
+            r.update({"dataset": dataset, "pred_len": pred_len, "structure": structure})
+            results.append(r)
+        except Exception as e:
+            log.warning(f"Could not load H96 genome from {h96_genome_path}: {e}")
 
     # Save
     out_path = Path(out_dir) / "ablation_results.json"
@@ -230,6 +243,9 @@ def build_parser():
                    help="Add ALL_CFC variant (requires Rec-4 = class 19)")
     p.add_argument("--ga_genome", type=str, default=None,
                    help="Path to ts_candidate_*.pt from Exp 1 (adds MIXED_GA variant)")
+    p.add_argument("--h96_genome", type=str, default=None,
+                   help="Path to H=96 best checkpoint — retrained at all horizons to test "
+                        "whether short-horizon architecture transfers (adds H96_FIXED variant)")
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--num_layers", type=int, default=4)
     p.add_argument("--seq_len", type=int, default=96)
@@ -257,6 +273,7 @@ def main():
             structure=args.structure,
             include_extended=args.include_extended,
             ga_genome_path=args.ga_genome,
+            h96_genome_path=args.h96_genome,
             train_steps=args.train_steps,
             dim=args.dim,
             num_layers=args.num_layers,

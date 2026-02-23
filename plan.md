@@ -983,6 +983,39 @@ python -m src.exp1_search \
 
 ## 13. Expected Experimental Results
 
+### Exp 1: Architecture Search
+
+**Setup**: NSGA-II on ETTh1, all 3 structures (dmamba / smamba / itransformer), all 4 horizons, evolution_steps=300, pop=16, gen=18.
+
+**Expected Pareto front characteristics**:
+- 5–15 non-dominated solutions trading quality vs parameter count
+- Best quality genome: ~1–5M params, MSE competitive with DMamba baseline (~0.37–0.42 at H=96)
+- Most parameter-efficient genome: ~500K–1M params, MSE ~5–10% above the quality frontier
+
+**Expected operator patterns per horizon**
+
+| Horizon | Seasonal / Variate component | Trend / Temporal component |
+|---------|------------------------------|---------------------------|
+| H=96, 192 | GConv-1 (class 7) dominant | SA-1 or SA-4 (attention) |
+| H=336, 720 | Rec-1 (SSM, class 5) emerges | GMemless or Rec-1 |
+| All horizons | CfC (class 19) unlikely to appear | OOM penalty during 300-step proxy biases against large-internal_dim operators |
+
+> **Empirical note (Exp 1 pre-run, dmamba ETTh1 H=96):** GConv-1 dominates seasonal in
+> all 9 Pareto-front candidates. No CfC selected. Best candidate `[7,7,1,4]` = 612K params,
+> quality=0.996 (proxy MSE). Consistent with short-horizon prediction above.
+
+**Expected structure comparison**:
+- `dmamba`: best on ETTh datasets — explicit seasonal/trend decomposition well-matched to hourly data
+- `itransformer`: best on high-variate datasets (Electricity 321, Traffic 862) — cross-variate attention
+- `smamba`: competitive middle ground; two-stage pipeline adds flexibility but also complexity
+
+**What would indicate a successful search**:
+- Pareto front contains architecturally diverse solutions (not all same operator family)
+- Best genome outperforms uniform ALL_SSM baseline from Exp 2 (validates GA search cost)
+- Different optimal genomes emerge per horizon (validates horizon-specific search need)
+
+---
+
 ### Exp 2: Operator Ablation
 
 **Setup**: Fix `structure=dmamba`, compare ALL_SSM / ALL_CONV / ALL_ATTN / ALL_FFN / MIXED_GA / H96_FIXED on ETTh1.
@@ -1094,3 +1127,66 @@ Zero-shot is a sanity check. If degradation is <10%, the operators generalise ex
 **What would invalidate the experiment**:
 - Rec-1 wins on all targets → architecture is ETTh1-specific and doesn't generalise at all
 - Searched wins on all targets including Traffic/Electricity → architecture is universally optimal (publish immediately)
+
+
+## 14. Future Work
+
+### A. Optimized Block Implementations for Post-GA Full Training
+
+During NSGA-II evolution, candidates run for only 300–500 steps so the current slow implementations are tolerable. But for **post-evolution full training** (50K–100K steps per top-K genome), each block family has a known bottleneck that should be replaced:
+
+**EMA decomposition** (DMamba structure)
+- Current bottleneck: Python `for t in range(L)` loop — 96 serial CUDA kernel dispatches per forward pass
+- Fix idea: parallel prefix scan — computes the same IIR filter result in O(log L) parallel rounds; no sequential dependency
+- Estimated speedup: ~10× for the EMA portion
+
+**SSM / Recurrence (classes 5, 6, 10, 11, 17–21)**
+- Current bottleneck: explicit SEMI_SEPARABLE matrix `(B, L, L, internal_dim)` — for Rec-1 this is 2.4 GB per layer per batch, and O(L²×16d) compute
+- Fix idea: Mamba-style parallel associative scan — avoids materialising the full L×L matrix; runs in O(L × internal_dim) memory and O(L log L) compute
+- Estimated speedup: ~40× for SSM-containing genomes (20s/step → ~0.5s/step)
+
+**Attention (classes 1–4)**
+- Current bottleneck: manual `T = C @ Bᵀ / sqrt(d)` followed by softmax — builds full L×L float32 matrix, O(L²) memory
+- Fix idea: drop-in replacement with `torch.nn.functional.scaled_dot_product_attention` which dispatches FlashAttention-2 automatically when available — O(L) memory, ~2–3× faster for L≥128
+
+**Convolution (classes 7–8)**
+- Already fast — GConv-1 (kernel size 3) is nearly free; GConv-2 (MLP-generated 64-tap kernel) is the slow one due to the MLP per forward pass
+- Fix idea: cache the generated kernel across calls in the same batch (kernel depends only on global average, which is the same for all positions)
+
+**Priority order**: SSM scan (highest impact) → EMA scan → FlashAttention → GConv-2 cache
+
+These fixes apply only to the full-training phase. The GA proxy evaluation can keep the current implementation for code simplicity.
+
+---
+
+### B. Test-Time Training on Diffusion Drafting Mistakes
+
+**Motivation**: TiDAR-TS draft mode predicts all H forecast steps in one forward pass. At long horizons (H=720) the draft head accumulates errors — it cannot condition on future ground truth and predictions drift from the AR-refined output.
+
+**Core idea**: At test time, when the lookback window is observed, run a few gradient steps to adapt the **draft head weights** using the AR-refined output as a free pseudo-label:
+
+```
+TTT-augmented inference:
+  1. Draft:    ŷ_draft  = diff_head(model(x))            — 1 forward pass
+  2. AR-ref:   ŷ_AR     = ar_head(model, x, k steps)     — k sequential passes
+  3. TTT loss: L = MSE(ŷ_draft,  stop_grad(ŷ_AR))        — draft learns from AR
+  4. Update:   θ_draft  ← θ_draft − η ∇L                 — only draft head updated
+  5. Re-draft: ŷ_final  = diff_head(model(x))            — corrected prediction
+```
+
+`stop_gradient` on `ŷ_AR` is critical — it prevents the AR head from being corrupted by the TTT update. Only the draft head parameters change; backbone and AR head stay frozen.
+
+**Why this works**:
+- The AR head is strictly more accurate than the draft head for the current input
+- The AR output is available at test time at no label cost — inference already runs the AR pass for the first k steps anyway
+- A small number of TTT gradient steps (3–10) adapts the draft head to the current input's distribution without overfitting
+
+**Expected benefit**:
+- Draft MSE after TTT ≈ partial-AR (k=4) quality at nearly draft speed
+- Largest gains on out-of-distribution inputs: regime shifts, anomalies, holiday effects
+- Directly addresses the end-goal noted in this plan: "Adding TTT upon mistakes during diffusion drafting"
+
+**Implementation path**:
+- Add `ttt_steps: int` parameter to `TiDARTSModel.forecast()`
+- When `ttt_steps > 0`: generate AR pseudo-label → compute TTT loss → update only `diff_head` → re-run draft
+- Add `--ttt_steps` flag to `exp4_speedup.py` to benchmark TTT overhead vs quality gain at each horizon

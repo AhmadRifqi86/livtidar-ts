@@ -639,6 +639,26 @@ genome_D = {
 | Traffic | 862      | 17544  | Hourly      | 96, 192, 336, 720 |
 | Exchange | 8       | 7588   | Daily       | 96, 192, 336, 720 |
 
+### Expected Operator Winners per Dataset
+
+Based on the inductive biases of each operator family and dataset characteristics.
+`H=S` = short horizons (96, 192); `H=L` = long horizons (336, 720).
+
+| Dataset | Horizon | Expected Winner | Reason |
+|---------|---------|----------------|--------|
+| ETTh1 / ETTh2 | H=S | GConv-1 (Conv) | Regular hourly sampling; local 3-tap window captures daily seasonality |
+| ETTh1 / ETTh2 | H=L | SSM (Rec-1) | Long-range memory needed; 3-tap conv cannot reach weekly dependencies |
+| ETTm1 / ETTm2 | H=S | GConv-1 (Conv) | 15-min granularity; seasonal patterns still within short local window |
+| ETTm1 / ETTm2 | H=L | SSM (Rec-1) | Same reasoning as ETTh at long horizon |
+| Electricity | Any | Attention + SSM | 321 variates; cross-variate correlation dominates; SSM for temporal |
+| Traffic | Any | SSM (Rec-1) | 862 variates; complex multi-scale spatial + temporal patterns; long-range memory critical |
+| Exchange | Any | CfC (Rec-4) | Daily financial rates; non-stationary regime shifts; CfC gate adapts to irregular dynamics |
+
+> **Empirical note (ETTh1 H=96, dmamba):** Exp 1 confirmed GConv-1 dominant in seasonal,
+> Attention in trend — consistent with the short-horizon prediction above. CfC was not
+> selected, likely due to OOM during 50-step search (internal_dim=16×256=4096 too large
+> at batch=16). Proper CfC evaluation requires Exp 3 with dedicated training budget.
+
 ### Baselines to Compare Against
 
 | Model | Type | Year | Key Mechanism |
@@ -878,3 +898,83 @@ Week 8  ── Paper Writing
 
 Note: Might exclude hybrid approach, focus on approach 1,2 and 3
 Endgoal: Adding TTT(test-time training) upon mistakes during diffusion drafting
+
+---
+
+## 12. How To Run
+
+### Exp 1 — Architecture Search (Full)
+
+Searches all 3 structures × 4 horizons on ETTh1 with the full operator pool.
+`--evolution_steps 300` is the recommended balance between ranking quality and compute time
+(~21 hrs total on RTX 4060 8GB). Use `--evolution_steps 500` for higher ranking confidence
+if time allows.
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.exp1_search \
+    --dataset ETTh1 \
+    --all_horizons \
+    --all_structures \
+    --include_extended \
+    --evolution_steps 300 \
+    --batch_size 16 \
+    --full_train_steps 10000 \
+    --top_k 8 \
+    --out_dir exp1_results
+```
+
+**Flags explained:**
+
+| Flag | Value | Reason |
+|------|-------|--------|
+| `--all_horizons` | — | Runs H=96, 192, 336, 720 |
+| `--all_structures` | — | Runs dmamba, smamba, itransformer |
+| `--include_extended` | — | Adds Rec-3/Rec-4 (CfC, classes 18-21) to search pool |
+| `--evolution_steps` | 300 | Steps per candidate during NSGA-II search (ranking proxy) |
+| `--batch_size` | 16 | Required for 8GB VRAM; prevents OOM on large candidates |
+| `--full_train_steps` | 10000 | Steps for post-evolution full training of top-K genomes |
+| `--top_k` | 8 | Number of Pareto-front candidates to fully train |
+| `PYTORCH_CUDA_ALLOC_CONF` | expandable_segments:True | Reduces CUDA memory fragmentation |
+
+**Output layout:**
+```
+exp1_results/
+  ETTh1_H96_dmamba/
+    pareto_front.json        # Pareto-optimal genomes + search-phase fitness
+    ts_candidate_1.pt        # fully-trained model checkpoint (best genome)
+    ts_candidate_2.pt
+    ...
+    gen_01.json .. gen_N.json  # per-generation population snapshots
+    final.json               # full final population with ranks
+  ETTh1_H96_smamba/
+  ETTh1_H96_itransformer/
+  ETTh1_H192_dmamba/
+  ...
+  summary.json               # MSE table across all structures and horizons
+```
+
+### Exp 1 — Dry Run (pipeline check, no training)
+
+```bash
+python -m src.exp1_search \
+    --dataset ETTh1 \
+    --pred_len 96 \
+    --structure dmamba \
+    --dry_run
+```
+
+### Exp 1 — Quick Smoke Test (real training, tiny scale)
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.exp1_search \
+    --dataset ETTh1 \
+    --pred_len 96 \
+    --structure dmamba \
+    --include_extended \
+    --evolution_steps 50 \
+    --batch_size 16 \
+    --full_train_steps 500 \
+    --top_k 3
+```

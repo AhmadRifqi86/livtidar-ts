@@ -1227,12 +1227,14 @@ python -m src.exp4_speedup \
 ```bash
 python -m src.exp4_speedup \
     --dataset ETTh1 --pred_len 96 \
-    --checkpoint exp1_results/ETTh1_H96_itransformer/tidar_ts_candidate_1.pt \
-    --batch_size 16 \
+    --genome_checkpoint exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 500 --batch_size 16 \
     --out_dir exp4_results_smoke
 ```
 
-> Uses a trained TiDAR-TS checkpoint so no training is needed; just times draft / partial-AR / full-AR modes.
+> Uses `--genome_checkpoint` (ts_candidate_*.pt from exp1) — loads genome, trains 500 steps,
+> then times draft / partial-AR(k=1,4,16) / full-AR modes and prints speedup table.
+> Use `--checkpoint tidar_ts_*.pt` instead if a fully trained TiDAR-TS model is available.
 
 ### Exp 4 — Full Run
 
@@ -1240,12 +1242,13 @@ python -m src.exp4_speedup \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python -m src.exp4_speedup \
     --dataset ETTh1 --all_horizons \
-    --checkpoint exp1_results/ETTh1_H96_itransformer/tidar_ts_candidate_1.pt \
-    --batch_size 16 \
+    --genome_checkpoint exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 30000 --batch_size 16 \
     --out_dir exp4_results
 ```
 
 > Run once per dataset; repeat for ETTh2, ETTm1, ETTm2 by changing `--dataset`.
+> The most informative horizon is H=720 — draft should show the largest speedup there.
 
 ---
 
@@ -1283,6 +1286,46 @@ python -m src.exp5_generalization \
 ```
 
 > Tests cross-dataset transfer: genome found on source trained/evaluated on target.
+
+---
+
+### Exp 6 — Dry Run (pipeline check, no training)
+
+```bash
+python -m src.exp6_alpha_ablation \
+    --dataset ETTh1 --pred_len 96 \
+    --train_steps 2 --batch_size 16
+```
+
+### Exp 6 — Quick Smoke Test
+
+```bash
+python -m src.exp6_alpha_ablation \
+    --dataset ETTh1 --pred_len 96 \
+    --structure itransformer \
+    --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 500 --batch_size 16 \
+    --out_dir exp6_results_smoke
+```
+
+> Trains 6 models (one per alpha) × 500 steps each. Prints ΔMSE table vs α=0 baseline.
+
+### Exp 6 — Full Run
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.exp6_alpha_ablation \
+    --dataset ETTh1 --all_horizons \
+    --structure itransformer \
+    --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --alphas 0.0 0.1 0.5 1.0 2.0 5.0 \
+    --train_steps 30000 --batch_size 16 \
+    --out_dir exp6_results
+```
+
+> 6 alpha values × 4 horizons = 24 training runs total.
+> All evaluated with ar_steps=0 (draft mode only) — MSE differences are purely
+> due to AR regularization strength during training, not AR refinement at inference.
 
 ---
 
@@ -1432,6 +1475,37 @@ Zero-shot is a sanity check. If degradation is <10%, the operators generalise ex
 **What would invalidate the experiment**:
 - Rec-1 wins on all targets → architecture is ETTh1-specific and doesn't generalise at all
 - Searched wins on all targets including Traffic/Electricity → architecture is universally optimal (publish immediately)
+
+---
+
+### Exp 6: Alpha Regularization Ablation
+
+**Setup**: Same genome ([7,9,7,9] from Exp 1 iTransformer H=96), same dataset (ETTh1),
+same train_steps. Only `alpha` varies. All models evaluated with `ar_steps=0` (pure draft).
+
+**Expected result — U-shaped or monotone curve:**
+
+| Alpha | Expected test_MSE | Interpretation |
+|-------|-------------------|----------------|
+| 0.0   | Highest (baseline) | No AR regularization → backbone takes shortcuts |
+| 0.1   | Lower than α=0 | Small regularization signal already helps |
+| 0.5   | Near optimal | Enough causality pressure without distorting draft objective |
+| 1.0   | Near optimal | Equal weight — current default |
+| 2.0   | Slight degradation | AR task begins to dominate the shared backbone |
+| 5.0   | Degraded | Backbone optimized as next-step predictor, not H-step forecaster |
+
+**Expected best alpha**: 0.5–1.0 range. If α=0 ties or beats all others, the AR head
+provides no regularization benefit and the TiDAR dual-head design should be questioned.
+
+**Key metric to watch**: ΔMSE(α=0 → α=best). If Δ < 1% → AR head is cosmetic.
+If Δ > 5% → AR head provides meaningful inductive bias for the draft head.
+
+**What would invalidate the hypothesis**:
+- α=0 (no AR) gives best MSE → remove AR head entirely, simplify to pure diffusion
+- Monotone improvement as α→∞ → draft head not needed, use AR inference instead
+
+**Secondary analysis**: Compare the val_MSE curves (convergence speed) across alphas.
+Higher alpha may converge faster early (easier next-step task) but plateau sooner.
 
 
 ## 14. Future Work

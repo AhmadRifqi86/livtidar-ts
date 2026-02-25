@@ -89,7 +89,7 @@ def load_genome_from_checkpoint(path: str, num_layers: int) -> Genome:
     """Load genome from a ts_candidate_*.pt checkpoint saved by post_ts_train."""
     ckpt = torch.load(path, map_location='cpu', weights_only=False)
     if 'genome' in ckpt:
-        return Genome.unflatten(ckpt['genome'], num_layers)
+        return Genome.from_flat(ckpt['genome'], num_layers)
     if 'layer_classes' in ckpt:
         # Fallback: reconstruct from class list (sharing info lost)
         classes = ckpt['layer_classes']

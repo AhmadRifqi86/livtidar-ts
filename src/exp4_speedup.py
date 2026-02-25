@@ -78,7 +78,7 @@ def load_tidar_model(
         # Full TiDAR-TS checkpoint: load model state directly
         ckpt = torch.load(checkpoint, map_location='cpu', weights_only=False)
         pool = build_class_pool(include_extended=True)
-        genome = Genome.unflatten(ckpt['genome'], num_layers)
+        genome = Genome.from_flat(ckpt['genome'], num_layers)
         args = make_args(
             dataset='ETTh1', pred_len=pred_len, structure='itransformer',
             out_dir='/tmp', dim=dim, num_layers=num_layers, seq_len=seq_len,

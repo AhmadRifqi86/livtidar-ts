@@ -204,69 +204,208 @@ Post-evolution: top-K Pareto-front candidates trained to convergence (20 K steps
 
 ### 2.3 Existing TS Structures — DMamba, S-Mamba, iTransformer
 
-All three share the same external interface: input `(B, L, C)` → output `(B, H, C)`.
-What differs is **how tokens are formed** and **how many backbones are used**.
+All three share the same external interface: input `(B, L, C)` → output `(B, H, C)` where B=batch, L=lookback length, C=number of variates, H=forecast horizon. What differs is **how tokens are formed**, **how many backbones are used**, and **what inductive bias is exploited**.
 
-#### DMamba (Decomposition + Dual Temporal Flow)
+---
 
-```
-(B, L, C)  →  RevIN  →  EMA decomposition
-                              │                    │
-                         Seasonal              Trend
-                       embed (C→D)          embed (C→D)
-                              │                    │
-                    backbone_seasonal      backbone_trend
-                    (L tokens, causal)    (L tokens, causal)
-                              │                    │
-                       proj (D→C)           proj (D→C)
-                       temporal (L→H)       temporal (L→H)
-                              └──────── + ──────────┘
-                                        │
-                                   RevIN denorm
-                                        │
-                                   (B, H, C)
-```
+#### DMamba — Decomposition + Dual Temporal Flow
 
-- Backbone processes **L temporal tokens** — causal (past cannot see future)
-- Genome split: first N/2 layers → seasonal backbone, last N/2 → trend backbone
-- Original operators: seasonal=Mamba, trend=MLP
+**Origin**: D-Mamba (Chen et al., 2025)
 
-#### S-Mamba (Two-Stage Variate-First)
+**Core insight**: Time series contains two qualitatively different components that benefit from separate treatment. The *seasonal* component holds high-frequency periodic patterns (daily/weekly cycles) best captured by operators with local receptive fields. The *trend* component holds slow low-frequency drift best captured by operators with long-range memory. Separating them via EMA and routing each through a dedicated LIV backbone lets the GA independently optimise the two paths.
 
 ```
-(B, L, C)  →  transpose  →  (B, C, L)
+Input (B, L, C)
+       │
+  ┌────▼────────────────────────────────────────┐
+  │  RevIN normalise (per-instance, per-variate) │  (B, L, C)  →  zero-mean, unit-var
+  └────┬────────────────────────────────────────┘
+       │
+  ┌────▼──────────────────────────────────┐
+  │  EMA Decomposition  (learnable α per C) │
+  └────┬──────────────────────┬────────────┘
+       │ seasonal              │ trend
+       │ x - EMA(x)            │ EMA(x)
+       │ (B, L, C)             │ (B, L, C)
+       │                       │
+  ┌────▼─────────┐       ┌─────▼────────┐
+  │ embed C → D  │       │ embed C → D  │   Linear projection per time-step
+  │ (B, L, D)    │       │ (B, L, D)    │
+  └────┬─────────┘       └─────┬────────┘
+       │                       │
+  ┌────▼──────────────┐  ┌─────▼─────────────┐
+  │ backbone_seasonal  │  │ backbone_trend     │   ← LIV genome layers 0..N/2-1
+  │ N/2 LIV blocks     │  │ N/2 LIV blocks     │   ← LIV genome layers N/2..N-1
+  │ L temporal tokens  │  │ L temporal tokens  │
+  │ causal masking     │  │ causal masking     │
+  │ (B, L, D)          │  │ (B, L, D)          │
+  └────┬──────────────┘  └─────┬──────────────┘
+       │                       │
+  ┌────▼─────────┐       ┌─────▼────────┐
+  │ proj D → C   │       │ proj D → C   │   (B, L, C)
+  │ temporal L→H │       │ temporal L→H │   Linear: maps lookback length to horizon
+  │ (B, H, C)    │       │ (B, H, C)    │
+  └────┬─────────┘       └─────┬────────┘
+       │                       │
+       └──────────┬────────────┘
+                  │  sum
+             ┌────▼──────────────────────────────┐
+             │  RevIN denormalise                  │  restore original scale
+             └────┬──────────────────────────────┘
                   │
-           variate_embed (L→D)     → (B, C, D)
-                  │
-         backbone_variate            ← stage 1: inter-variate correlation
-         (C tokens, bidirectional)
-                  │
-         backbone_temporal           ← stage 2: temporal dependency
-         (C tokens, bidirectional)
-                  │
-          proj (D→H)  →  transpose  →  (B, H, C)
+            Output (B, H, C)
 ```
 
-- Backbone processes **C variate tokens** — bidirectional
-- Genome split: first N/2 → variate backbone, last N/2 → temporal backbone
-- Original operators: variate=BiMamba, temporal=FFN
+**Key properties**:
+- Tokens are **L temporal positions** — each token represents one time-step across all D features
+- Processing is **causal**: time-step t can only attend to steps 0..t (no future leakage)
+- The EMA decomposition is **learnable**: α per variate trained end-to-end
+- **Genome split**: layers 0..N/2-1 control seasonal path; layers N/2..N-1 control trend path
+- Original paper operators: seasonal = Mamba (SSM), trend = MLP
+- GA finding (Exp 1, ETTh1 H=96): seasonal = GConv-1, trend = Diff-Attention variants
 
-#### iTransformer (Single Variate-First Backbone)
+**Weakness**: Cannot model cross-variate correlations — each time-step token mixes all C variates into a single D-dim vector before the backbone, so inter-variate structure is not explicitly captured.
+
+---
+
+#### S-Mamba — Two-Stage Variate-First Pipeline
+
+**Origin**: S-Mamba (Wang et al., 2024)
+
+**Core insight**: Multivariate forecasting requires two distinct types of modelling: (1) *inter-variate correlation* — which variables move together, lead or lag each other; (2) *temporal dependency* — how each variable evolves over time. S-Mamba handles them in sequence: a first backbone mixes information across the C variate tokens to build a correlated representation, then a second backbone refines temporal dependencies within those C tokens.
 
 ```
-(B, L, C)  →  transpose  →  (B, C, L)
-                  │
-           variate_embed (L→D)     → (B, C, D)
-                  │
-             backbone
-         (C tokens, bidirectional)   ← N stacked blocks, each: cross-variate + per-variate
-                  │
-          proj (D→H)  →  transpose  →  (B, H, C)
+Input (B, L, C)
+       │
+  ┌────▼──────────────────────────────────┐
+  │  Transpose: (B, L, C) → (B, C, L)     │  variates become the "sequence"
+  └────┬──────────────────────────────────┘
+       │
+  ┌────▼─────────────────────────────────────────────────────┐
+  │  variate_embed:  Linear(L → D)  applied independently     │
+  │  each variate's L-length history → single D-dim token     │
+  │  (B, C, L)  →  (B, C, D)                                 │
+  └────┬─────────────────────────────────────────────────────┘
+       │  C tokens, each of dimension D
+       │
+  ┌────▼────────────────────────────────────────────────────────────────────┐
+  │  Stage 1 — backbone_variate  (LIV genome layers 0..N/2-1)               │
+  │                                                                          │
+  │   ┌───────────────────────────────────────────────────────────────────┐ │
+  │   │  LIV block i  (bidirectional, processes C variate tokens)         │ │
+  │   │  token_mix: cross-variate operator (SSM / Conv / Attn / FFN)      │ │
+  │   │  channel_mix: per-dimension dense projection                      │ │
+  │   │  (B, C, D) → (B, C, D)                                           │ │
+  │   └───────────────────────────────────────────────────────────────────┘ │
+  │   × N/2 blocks                                                           │
+  │                                                                          │
+  │  Purpose: build correlated variate representations                       │
+  │  each variate token now "knows about" other variates                     │
+  └────┬────────────────────────────────────────────────────────────────────┘
+       │  (B, C, D)
+       │
+  ┌────▼────────────────────────────────────────────────────────────────────┐
+  │  Stage 2 — backbone_temporal  (LIV genome layers N/2..N-1)              │
+  │                                                                          │
+  │   ┌───────────────────────────────────────────────────────────────────┐ │
+  │   │  LIV block i  (bidirectional, still processes C variate tokens)   │ │
+  │   │  token_mix: temporal refinement operator (FFN / Conv / SSM)       │ │
+  │   │  channel_mix: per-dimension dense projection                      │ │
+  │   │  (B, C, D) → (B, C, D)                                           │ │
+  │   └───────────────────────────────────────────────────────────────────┘ │
+  │   × N/2 blocks                                                           │
+  │                                                                          │
+  │  Purpose: refine temporal structure in the correlated D-dim space        │
+  └────┬────────────────────────────────────────────────────────────────────┘
+       │  (B, C, D)
+       │
+  ┌────▼──────────────────────────────────────────────────────┐
+  │  proj: Linear(D → H) per variate token                    │
+  │  (B, C, D)  →  (B, C, H)                                 │
+  └────┬──────────────────────────────────────────────────────┘
+       │
+  ┌────▼──────────────────────────────────────────────────────┐
+  │  Transpose: (B, C, H)  →  (B, H, C)                      │
+  └────┬──────────────────────────────────────────────────────┘
+       │
+  Output (B, H, C)
 ```
 
-- Same variate-first orientation as S-Mamba but **single backbone**, no stage split
-- Full genome → one backbone
-- Original operators: cross-variate=Attention, per-variate=FFN
+**Key properties**:
+- Tokens are **C variates** — each token represents one variate's entire history as a D-dim embedding
+- Both stages are **bidirectional**: no causal constraint (future variate context is helpful for correlation)
+- **Genome split**: layers 0..N/2-1 → variate backbone (stage 1); layers N/2..N-1 → temporal backbone (stage 2)
+- Original paper operators: variate = BiMamba (bidirectional SSM), temporal = FFN
+- GA finding (Exp 1, ETTh1 H=96): variate = GConv-1 + Rec-2, temporal = GConv-1 + GMemless
+
+**Weakness**: Stage 2 still processes C variate tokens, not L temporal tokens — temporal dependencies are captured indirectly through the D-dimensional embedding, not directly over the time axis.
+
+---
+
+#### iTransformer — Inverted Variate Token Transformer
+
+**Origin**: iTransformer (Liu et al., 2024)
+
+**Core insight**: The original Transformer for time series applies attention over L temporal positions — but this conflates temporal modelling with multivariate modelling and scales as O(L²). Inverting the token definition so each variate becomes a token (rather than each time-step) enables: (1) cross-variate attention that directly models which variates are correlated; (2) O(C²) cost instead of O(L²), which is much cheaper when C << L; (3) per-variate FFN that models each variate's own feature transformation independently.
+
+```
+Input (B, L, C)
+       │
+  ┌────▼──────────────────────────────────┐
+  │  Transpose: (B, L, C) → (B, C, L)     │  variates become the sequence dimension
+  └────┬──────────────────────────────────┘
+       │
+  ┌────▼─────────────────────────────────────────────────────┐
+  │  variate_embed:  Linear(L → D)  applied per variate       │
+  │  compress each variate's full L-step history into D dims  │
+  │  (B, C, L)  →  (B, C, D)                                 │
+  └────┬─────────────────────────────────────────────────────┘
+       │  C tokens, each = one variate's history summary
+       │
+  ┌────▼────────────────────────────────────────────────────────────────────┐
+  │  × N stacked LIV blocks  (LIV genome layers 0..N-1, full genome)        │
+  │                                                                          │
+  │   ┌───────────────────────────────────────────────────────────────────┐ │
+  │   │  token_mix  — cross-variate operator                              │ │
+  │   │  mixes information across C variate tokens                        │ │
+  │   │  operator choices: SA-1 (attention) / GConv-1 / SSM / GMemless   │ │
+  │   │  (B, C, D) → (B, C, D)                                           │ │
+  │   └───────────────────────────────────────────────────────────────────┘ │
+  │                         │                                                │
+  │   ┌───────────────────────────────────────────────────────────────────┐ │
+  │   │  channel_mix  — per-variate operator                              │ │
+  │   │  applied independently to each variate's D-dim representation     │ │
+  │   │  operator choices: GMemless (FFN) / GConv-1 / SA                  │ │
+  │   │  (B, C, D) → (B, C, D)                                           │ │
+  │   └───────────────────────────────────────────────────────────────────┘ │
+  │                                                                          │
+  └────┬────────────────────────────────────────────────────────────────────┘
+       │  (B, C, D)
+       │
+  ┌────▼──────────────────────────────────────────────────────┐
+  │  proj: Linear(D → H) per variate token                    │
+  │  directly predicts forecast horizon from D-dim embedding  │
+  │  (B, C, D)  →  (B, C, H)                                 │
+  └────┬──────────────────────────────────────────────────────┘
+       │
+  ┌────▼──────────────────────────────────────────────────────┐
+  │  Transpose: (B, C, H)  →  (B, H, C)                      │
+  └────┬──────────────────────────────────────────────────────┘
+       │
+  Output (B, H, C)
+```
+
+**Key properties**:
+- Tokens are **C variates** — one token per variate, embedding its entire L-step history
+- Single backbone, **no stage split**: N blocks each alternate between cross-variate (token_mix) and per-variate (channel_mix)
+- **Bidirectional**: all C variate tokens attend to each other freely
+- **Full genome → one backbone**: all N genome layers belong to the same backbone; even-numbered layers are token_mix slots, odd-numbered are channel_mix slots (or alternating by block)
+- Original paper operators: cross-variate = SA-1 (attention), per-variate = GMemless (FFN)
+- GA finding (Exp 1, ETTh1 H=96): cross-variate = **GConv-1**, per-variate = GMemless — GA replaced attention with a 3-tap convolution over variate indices, which is sufficient for 7 correlated variates at short horizons
+
+**Strength**: Most parameter-efficient for small C; naturally captures cross-variate correlations; per-variate FFN allows each variate to have its own feature transform.
+
+---
 
 **Key differences summary:**
 
@@ -277,6 +416,8 @@ What differs is **how tokens are formed** and **how many backbones are used**.
 | Causality | Causal | Bidirectional | Bidirectional |
 | Decomposition | EMA + RevIN | None | None |
 | Genome split | First/last half | First/last half | Full genome |
+| Best at | Long horizons, smooth trends | Mixed variate + temporal | Short horizons, many variates |
+| Weakness | No cross-variate modelling | Indirect temporal axis | No explicit temporal structure |
 
 ---
 
@@ -978,6 +1119,170 @@ python -m src.exp1_search \
     --full_train_steps 500 \
     --top_k 3
 ```
+
+### Exp 1 — Full Run
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.exp1_search \
+    --all_horizons \
+    --all_structures \
+    --include_extended \
+    --evolution_steps 300 \
+    --batch_size 16 \
+    --full_train_steps 50000 \
+    --max_params 7000000 \
+    --top_k 5 \
+    --out_dir exp1_results
+```
+
+---
+
+### Exp 2 — Dry Run (pipeline check, no training)
+
+```bash
+python -m src.exp2_ablation \
+    --dataset ETTh1 --pred_len 96 \
+    --structure itransformer \
+    --train_steps 2 --batch_size 16
+```
+
+### Exp 2 — Quick Smoke Test
+
+```bash
+python -m src.exp2_ablation \
+    --dataset ETTh1 --pred_len 96 \
+    --structure itransformer \
+    --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 500 --batch_size 16 \
+    --out_dir exp2_results_smoke
+```
+
+> Note: avoid `--structure dmamba` for smoke tests — ALL_SSM on L=96 temporal tokens causes OOM (~9.6 GB).
+> Use `itransformer` or `smamba` (C=7 variate tokens, safe).
+
+### Exp 2 — Full Run
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.exp2_ablation \
+    --all_datasets --all_horizons \
+    --structure itransformer \
+    --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 50000 --batch_size 16 \
+    --out_dir exp2_results
+```
+
+---
+
+### Exp 3 — Dry Run (pipeline check, no training)
+
+```bash
+python -m src.exp3_cfc_vs_ssm \
+    --dataset ETTh1 --pred_len 96 \
+    --structure itransformer \
+    --train_steps 2 --batch_size 16
+```
+
+### Exp 3 — Quick Smoke Test
+
+```bash
+python -m src.exp3_cfc_vs_ssm \
+    --dataset ETTh1 --pred_len 96 \
+    --structure itransformer \
+    --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 500 --batch_size 16 \
+    --out_dir exp3_results_smoke
+```
+
+> Trains SSM_Rec1 and CfC_Rec4 variants for 500 steps each, prints winner.
+> Use `--irregular_focus` to target Weather + ILI (key hypothesis datasets).
+
+### Exp 3 — Full Run
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.exp3_cfc_vs_ssm \
+    --all_datasets --all_horizons \
+    --structure itransformer \
+    --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 50000 --batch_size 16 \
+    --out_dir exp3_results
+```
+
+> 7 datasets × 4 horizons × 2 variants = 56 training runs total.
+
+---
+
+### Exp 4 — Dry Run (pipeline check, no training)
+
+```bash
+python -m src.exp4_speedup \
+    --dataset ETTh1 --pred_len 96 \
+    --train_steps 2 --batch_size 16
+```
+
+### Exp 4 — Quick Smoke Test
+
+```bash
+python -m src.exp4_speedup \
+    --dataset ETTh1 --pred_len 96 \
+    --checkpoint exp1_results/ETTh1_H96_itransformer/tidar_ts_candidate_1.pt \
+    --batch_size 16 \
+    --out_dir exp4_results_smoke
+```
+
+> Uses a trained TiDAR-TS checkpoint so no training is needed; just times draft / partial-AR / full-AR modes.
+
+### Exp 4 — Full Run
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.exp4_speedup \
+    --dataset ETTh1 --all_horizons \
+    --checkpoint exp1_results/ETTh1_H96_itransformer/tidar_ts_candidate_1.pt \
+    --batch_size 16 \
+    --out_dir exp4_results
+```
+
+> Run once per dataset; repeat for ETTh2, ETTm1, ETTm2 by changing `--dataset`.
+
+---
+
+### Exp 5 — Dry Run (pipeline check, no training)
+
+```bash
+python -m src.exp5_generalization \
+    --source_dataset ETTh1 --target_dataset ETTh2 \
+    --pred_len 96 --structure itransformer \
+    --train_steps 2 --batch_size 16
+```
+
+### Exp 5 — Quick Smoke Test
+
+```bash
+python -m src.exp5_generalization \
+    --source_dataset ETTh1 --target_dataset ETTh2 \
+    --pred_len 96 --structure itransformer \
+    --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 500 --batch_size 16 \
+    --out_dir exp5_results_smoke
+```
+
+### Exp 5 — Full Run
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.exp5_generalization \
+    --all_transfers \
+    --all_horizons \
+    --structure itransformer \
+    --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \
+    --train_steps 50000 --batch_size 16 \
+    --out_dir exp5_results
+```
+
+> Tests cross-dataset transfer: genome found on source trained/evaluated on target.
 
 ---
 

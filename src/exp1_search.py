@@ -58,9 +58,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 STRUCTURES   = ["dmamba", "smamba", "itransformer"]
-HORIZONS     = [96, 192, 336, 720]
-ALL_DATASETS = ["ETTh1", "ETTh2", "ETTm1", "ETTm2", "Electricity", "Traffic", "Exchange"]
-
+HORIZONS     = [96, 336, 720]
+ALL_DATASETS = ["ETTh1", "ETTm1"]
+#ALL_DATASETS = ["ETTh1", "ETTm1", "Electricity", "Traffic", "Exchange"]
 
 # =============================================================================
 # Args namespace builder

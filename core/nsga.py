@@ -26,7 +26,7 @@ import torch.nn as nn
 
 from core.liv import (
     SA1, SA2, SA3, SA4,
-    Rec1, Rec2, Rec3, Rec4,
+    Rec1, Rec2, Rec3, Rec4, Rec5,
     GConv1, GConv2,
     GMemless,
     UnifiedLIV, UnifiedLIVBlock, DifferentialLIV,
@@ -130,6 +130,18 @@ def build_class_pool(include_extended: bool = False) -> Dict[int, LIVClassSpec]:
             class_id=21, name="Diff-Rec-4",
             builder_fn=_diff_builder(Rec4),
             is_differential=True, base_class_id=19,
+            category=CAT_RECURRENCE, default_kwargs={},
+        )
+        pool[22] = LIVClassSpec(
+            class_id=22, name="Rec-5",
+            builder_fn=Rec5,
+            is_differential=False, base_class_id=None,
+            category=CAT_RECURRENCE, default_kwargs={},
+        )
+        pool[23] = LIVClassSpec(
+            class_id=23, name="Diff-Rec-5",
+            builder_fn=_diff_builder(Rec5),
+            is_differential=True, base_class_id=22,
             category=CAT_RECURRENCE, default_kwargs={},
         )
 
@@ -440,9 +452,9 @@ def estimate_kv_cache(genome: Genome, class_pool: Dict[int, LIVClassSpec],
             layer_cache = 2 * seq_len * dim
         elif cat == CAT_RECURRENCE:
             # Recurrence state depends on expansion
-            if spec.base_class_id in (5, 18) or gene.liv_class in (5, 18):
-                expansion = 16
-            elif spec.base_class_id == 19 or gene.liv_class == 19:
+            # expansion=16: Rec-1(5), Rec-3(18), Rec-4(19) and their diff variants
+            # expansion=2:  Rec-2(6), Rec-5(22) and their diff variants
+            if gene.liv_class in (5, 18, 19) or spec.base_class_id in (5, 18, 19):
                 expansion = 16
             else:
                 expansion = 2

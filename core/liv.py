@@ -1045,6 +1045,20 @@ def Rec4(dim: int, expansion: int = 16, **kw) -> UnifiedLIV:
                       num_heads=1, featurizer_cls=11, expansion=expansion,
                       use_softmax=False, **kw)
 
+def Rec5(dim: int, expansion: int = 2, **kw) -> UnifiedLIV:
+    """Rec-5: Compact CfC/LNN. Same gating as Rec-4 but expansion=2 (matches Rec-2 size).
+
+    Analogous to Rec-2 being the compact version of Rec-1:
+      Rec-1 (SSM, expansion=16)  ↔  Rec-2 (SSM, expansion=2)
+      Rec-4 (CfC, expansion=16)  ↔  Rec-5 (CfC, expansion=2)
+
+    Allows CfC to compete fairly alongside attention/conv in DMamba temporal paths
+    without the 16.9M param explosion of Rec-4.
+    """
+    return UnifiedLIV(dim, TokenMixType.SEMI_SEPARABLE, ChannelMixType.DIAGONAL,
+                      num_heads=1, featurizer_cls=11, expansion=expansion,
+                      use_softmax=False, **kw)
+
 # --- Convolution variants ---
 
 def GConv1(dim: int, kernel_size: int = 3, **kw) -> UnifiedLIV:

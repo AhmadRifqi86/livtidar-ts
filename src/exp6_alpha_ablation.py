@@ -118,6 +118,7 @@ def run_alpha_sweep(
         )
         args.train_steps = train_steps
         args.tidar_alpha = alpha
+        args.n_variates = n_variates
 
         model = _build_tidar_ts_model(genome, pool, args)
         n_params = count_params(model)

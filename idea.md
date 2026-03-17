@@ -175,3 +175,17 @@ If you built this today, you wouldn't have a table of strings. You would have:
 
 **Would you like me to show you the specific math (or a Python snippet) for how a "Translational" or "Rotational" relation is updated during a training step?**
 ```
+
+
+## Medoid HNSW
+- Current HNSW picking stop using real node that is choosen probabilistically, instead of using optimal node that is
+guaranteed to be as closest possible to the answer
+- Medoid as stop is where nodes is clustered using hierarchical K-Means by this step:
+  - group each node into n cluster, each cluster has a centroid
+  - pick a node that closest to the centroid
+  - too complicated for small search space
+
+## HubNSW
+
+- Pick the most connected node as hub/stop
+- won't work at hyperconnected node, bisa diakalin dengan clustering?

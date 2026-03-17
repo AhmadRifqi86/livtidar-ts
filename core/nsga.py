@@ -402,6 +402,17 @@ class GenomeModelBuilder:
                         for attr in attr_names:
                             if hasattr(source_feat, attr) and hasattr(target_feat, attr):
                                 src_param = getattr(source_feat, attr)
+                                dst_param = getattr(target_feat, attr)
+                                # Skip if parameter shapes are incompatible
+                                # (e.g., SA-1 W_V: Linear(256,256) vs SA-3 W_V: Linear(256,32))
+                                if (isinstance(src_param, nn.Linear) and
+                                        isinstance(dst_param, nn.Linear) and
+                                        src_param.weight.shape != dst_param.weight.shape):
+                                    continue
+                                if (isinstance(src_param, nn.Parameter) and
+                                        isinstance(dst_param, nn.Parameter) and
+                                        src_param.shape != dst_param.shape):
+                                    continue
                                 setattr(target_feat, attr, src_param)
 
 

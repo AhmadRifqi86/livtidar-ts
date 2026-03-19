@@ -57,7 +57,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-STRUCTURES   = ["dmamba", "smamba", "itransformer"]
+STRUCTURES   = ["smamba", "itransformer"]
 HORIZONS     = [96, 336, 720]
 ALL_DATASETS = ["ETTh1", "ETTm1"]
 #ALL_DATASETS = ["ETTh1", "ETTm1", "Electricity", "Traffic", "Exchange"]

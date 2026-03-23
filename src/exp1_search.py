@@ -59,7 +59,7 @@ log = logging.getLogger(__name__)
 
 STRUCTURES   = ["smamba", "itransformer"]
 HORIZONS     = [96, 336, 720]
-ALL_DATASETS = ["ETTh1", "ETTm1"]
+ALL_DATASETS = ["ETTh1", "Exchange"]
 #ALL_DATASETS = ["ETTh1", "ETTm1", "Electricity", "Traffic", "Exchange"]
 
 # =============================================================================

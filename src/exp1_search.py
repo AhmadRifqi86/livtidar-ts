@@ -299,6 +299,13 @@ def main():
     torch.manual_seed(cli.seed)
     random.seed(cli.seed)
 
+    # Resolve device once globally — avoids re-evaluating torch.cuda.is_available()
+    # on each iteration, which returns False if the CUDA context was corrupted by
+    # a prior failed run in the same process.
+    resolved_device = cli.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    cli.device = resolved_device
+    log.info(f"Device: {resolved_device}")
+
     structures = STRUCTURES if cli.all_structures else [cli.structure]
     horizons   = HORIZONS   if cli.all_horizons   else [cli.pred_len]
 

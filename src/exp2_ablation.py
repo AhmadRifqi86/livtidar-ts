@@ -48,11 +48,10 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-HORIZONS = [96, 192, 336, 720]
+HORIZONS = [96, 336, 720]
 
 # Operator family → representative class ID
 ABLATION_VARIANTS = {
-    "ALL_SSM":  5,   # Rec-1
     "ALL_CONV": 7,   # GConv-1
     "ALL_ATTN": 1,   # SA-1
     "ALL_FFN":  9,   # GMemless
@@ -196,15 +195,20 @@ def run_ablation(
         results.append(r)
 
     # GA-found MIXED variant (best genome for this specific horizon from Exp 1)
+    # ga_genome_path can be a folder (exp1 results root) or a direct .pt file.
+    # If a folder, resolve to {folder}/{dataset}_H{pred_len}_{structure}/ts_candidate_1.pt
     if ga_genome_path:
+        p = Path(ga_genome_path)
+        if p.is_dir():
+            p = p / f"{dataset}_H{pred_len}_{structure}" / "ts_candidate_1.pt"
         try:
-            genome = load_genome_from_checkpoint(ga_genome_path, num_layers)
+            genome = load_genome_from_checkpoint(str(p), num_layers)
             repair(genome, pool)
             r = run_variant("MIXED_GA", genome, pool, train_dl, val_dl, test_dl, args)
             r.update({"dataset": dataset, "pred_len": pred_len, "structure": structure})
             results.append(r)
         except Exception as e:
-            log.warning(f"Could not load GA genome from {ga_genome_path}: {e}")
+            log.warning(f"Could not load GA genome from {p}: {e}")
 
     # H=96 best genome retrained at current horizon — tests "does the short-horizon
     # architecture generalise to longer horizons, or does SSM win at H=336/720?"

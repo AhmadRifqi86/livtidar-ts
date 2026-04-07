@@ -245,9 +245,13 @@ def get_dataloader(
     T, C = raw.shape
     train_end, val_end = _split_indices(dataset, T)
 
+    # Overlapping splits: val/test include the last seq_len rows from the
+    # previous split as lookback context. This is standard in the literature
+    # (Time-Series-Library, PatchTST, Autoformer) and ensures val/test are
+    # never empty even for large pred_len (e.g. Exchange H720).
     train_data = raw[:train_end]
-    val_data = raw[train_end:val_end]
-    test_data = raw[val_end:]
+    val_data = raw[train_end - seq_len:val_end]
+    test_data = raw[val_end - seq_len:]
 
     # fit scaler on training data only
     scaler = StandardScaler()

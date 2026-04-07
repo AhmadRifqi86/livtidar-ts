@@ -746,8 +746,11 @@ def evaluate_ts(model, dataloader, args):
         n += batch_y.numel()
 
     model.train()
-    mse = total_mse / max(n, 1)
-    mae = total_mae / max(n, 1)
+    if n == 0:
+        log.warning("evaluate_ts: dataloader yielded no batches — returning inf (GPU/worker crash?)")
+        return float("inf"), float("inf")
+    mse = total_mse / n
+    mae = total_mae / n
     return mse, mae
 
 

@@ -121,22 +121,22 @@ else
 fi
 
 # ---- ILI (Influenza-Like Illness) Dataset ----
-# echo ""
-# echo "[5/7] Downloading ILI dataset..."
-# ILI_DIR="$DATA_DIR/illness"
-# mkdir -p "$ILI_DIR"
+echo ""
+echo "[5/7] Downloading ILI dataset..."
+ILI_DIR="$DATA_DIR/illness"
+mkdir -p "$ILI_DIR"
 
-# if [ -f "$ILI_DIR/national_illness.csv" ]; then
-#     echo "  - national_illness.csv already exists, skipping."
-# else
-#     wget -q --show-progress \
-#         "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/national_illness.csv" \
-#         -O "$ILI_DIR/national_illness.csv" 2>/dev/null || {
-#         echo "  - Primary source failed. Trying Google Drive..."
-#         download_from_gdrive "1UbDd8klLd7Y_h8nI_D1R5-xJPPUvuiRR" "$ILI_DIR/national_illness.csv"
-#     }
-#     echo "  - national_illness.csv downloaded."
-# fi
+if [ -f "$ILI_DIR/national_illness.csv" ]; then
+    echo "  - national_illness.csv already exists, skipping."
+else
+    wget -q --show-progress \
+        "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/national_illness.csv" \
+        -O "$ILI_DIR/national_illness.csv" 2>/dev/null || {
+        echo "  - Primary source failed. Trying Google Drive..."
+        download_from_gdrive "1UbDd8klLd7Y_h8nI_D1R5-xJPPUvuiRR" "$ILI_DIR/national_illness.csv"
+    }
+    echo "  - national_illness.csv downloaded."
+fi
 
 # ---- Exchange Rate Dataset ----
 echo ""

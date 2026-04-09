@@ -196,11 +196,24 @@ def run_ablation(
 
     # GA-found MIXED variant (best genome for this specific horizon from Exp 1)
     # ga_genome_path can be a folder (exp1 results root) or a direct .pt file.
-    # If a folder, resolve to {folder}/{dataset}_H{pred_len}_{structure}/ts_candidate_1.pt
+    # If a folder, resolve to {folder}/{dataset}_H{pred_len}_{structure}/ts_candidate_N.pt
+    # where N is the rank with the best test_mse in candidates_summary.json.
     if ga_genome_path:
         p = Path(ga_genome_path)
         if p.is_dir():
-            p = p / f"{dataset}_H{pred_len}_{structure}" / "ts_candidate_1.pt"
+            run_dir = p / f"{dataset}_H{pred_len}_{structure}"
+            summary_path = run_dir / "candidates_summary.json"
+            if summary_path.exists():
+                with open(summary_path) as f:
+                    candidates = json.load(f)
+                best = min(candidates, key=lambda c: c["test_mse"])
+                rank = best["rank_in_candidates"]
+                log.info(f"MIXED_GA: best test_mse={best['test_mse']:.4f} at rank {rank} "
+                         f"genome={best['layer_classes']}")
+                p = run_dir / f"ts_candidate_{rank}.pt"
+            else:
+                log.warning(f"No candidates_summary.json in {run_dir}, falling back to ts_candidate_1.pt")
+                p = run_dir / "ts_candidate_1.pt"
         try:
             genome = load_genome_from_checkpoint(str(p), num_layers)
             repair(genome, pool)

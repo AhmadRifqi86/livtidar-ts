@@ -196,8 +196,10 @@ def run_ablation(
 
     # GA-found MIXED variant (best genome for this specific horizon from Exp 1)
     # ga_genome_path can be a folder (exp1 results root) or a direct .pt file.
-    # If a folder, resolve to {folder}/{dataset}_H{pred_len}_{structure}/ts_candidate_N.pt
-    # where N is the rank with the best test_mse in candidates_summary.json.
+    # If a folder, scan all ts_candidate_*.pt files and match by layer_classes to
+    # the best test_mse entry in candidates_summary.json. This avoids the
+    # rank-vs-filename mismatch: .pt files are numbered by training order (evolution
+    # quality), while candidates_summary.json ranks by val_mse — different orderings.
     if ga_genome_path:
         p = Path(ga_genome_path)
         if p.is_dir():
@@ -207,10 +209,27 @@ def run_ablation(
                 with open(summary_path) as f:
                     candidates = json.load(f)
                 best = min(candidates, key=lambda c: c["test_mse"])
-                rank = best["rank_in_candidates"]
-                log.info(f"MIXED_GA: best test_mse={best['test_mse']:.4f} at rank {rank} "
-                         f"genome={best['layer_classes']}")
-                p = run_dir / f"ts_candidate_{rank}.pt"
+                target_classes = best["layer_classes"]
+                log.info(f"MIXED_GA: best test_mse={best['test_mse']:.4f} "
+                         f"genome={target_classes}")
+                # Find the .pt file whose layer_classes matches target_classes
+                pt_files = sorted(run_dir.glob("ts_candidate_*.pt"))
+                matched_pt = None
+                for pt_file in pt_files:
+                    try:
+                        ckpt = torch.load(pt_file, map_location='cpu', weights_only=False)
+                        if ckpt.get("layer_classes") == target_classes:
+                            matched_pt = pt_file
+                            break
+                    except Exception:
+                        continue
+                if matched_pt is None:
+                    log.warning(f"No .pt file matched layer_classes={target_classes}, "
+                                f"falling back to ts_candidate_1.pt")
+                    matched_pt = run_dir / "ts_candidate_1.pt"
+                else:
+                    log.info(f"MIXED_GA: matched checkpoint {matched_pt.name}")
+                p = matched_pt
             else:
                 log.warning(f"No candidates_summary.json in {run_dir}, falling back to ts_candidate_1.pt")
                 p = run_dir / "ts_candidate_1.pt"

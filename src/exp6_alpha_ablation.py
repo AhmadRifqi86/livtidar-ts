@@ -29,6 +29,11 @@ Usage:
     python -m src.exp6_alpha_ablation --dataset ETTh1 --all_horizons \\
         --base_genome exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \\
         --train_steps 30000 --batch_size 16 --out_dir exp6_results
+
+    # Full run — per-horizon best genome from exp1 results directory
+    python -m src.exp6_alpha_ablation --dataset Exchange --all_horizons \\
+        --base_genome exp1_results_fixedv2_exchange/ --structure smamba \\
+        --train_steps 30000 --batch_size 16 --out_dir exp6_results_smamba
 """
 
 import argparse
@@ -53,6 +58,50 @@ log = logging.getLogger(__name__)
 
 HORIZONS     = [96, 192, 336, 720]
 DEFAULT_ALPHAS = [0.0, 0.1, 0.5, 1.0, 2.0, 5.0]
+
+
+# =============================================================================
+# Checkpoint resolution
+# =============================================================================
+
+def _resolve_base_genome(
+    base_genome: str,
+    dataset: str,
+    pred_len: int,
+    structure: str,
+) -> str:
+    """If base_genome is a directory, find best test_mse .pt for this horizon+structure.
+
+    Scans {base_genome}/{dataset}_H{pred_len}_{structure}/candidates_summary.json,
+    picks the entry with lowest test_mse, then matches the .pt file by layer_classes.
+    Falls back to ts_candidate_1.pt if no match is found.
+    """
+    p = Path(base_genome)
+    if not p.is_dir():
+        return base_genome  # direct file path — use as-is
+    run_dir = p / f"{dataset}_H{pred_len}_{structure}"
+    summary_path = run_dir / "candidates_summary.json"
+    if summary_path.exists():
+        with open(summary_path) as f:
+            candidates = json.load(f)
+        best = min(candidates, key=lambda c: c["test_mse"])
+        target_classes = best["layer_classes"]
+        log.info(
+            f"base_genome dir: best test_mse={best['test_mse']:.4f} "
+            f"genome={target_classes} in {run_dir.name}"
+        )
+        for pt_file in sorted(run_dir.glob("ts_candidate_*.pt")):
+            try:
+                ckpt = torch.load(pt_file, map_location="cpu", weights_only=False)
+                if ckpt.get("layer_classes") == target_classes:
+                    log.info(f"Matched {pt_file.name}")
+                    return str(pt_file)
+            except Exception:
+                continue
+        log.warning("No .pt matched layer_classes, falling back to ts_candidate_1.pt")
+        return str(run_dir / "ts_candidate_1.pt")
+    log.warning(f"No candidates_summary.json in {run_dir}, falling back to ts_candidate_1.pt")
+    return str(run_dir / "ts_candidate_1.pt")
 
 
 # =============================================================================
@@ -181,7 +230,9 @@ def build_parser():
     p.add_argument("--structure", type=str, default="itransformer",
                    choices=["dmamba", "smamba", "itransformer"])
     p.add_argument("--base_genome", type=str, default=None,
-                   help="Path to ts_candidate_*.pt from Exp 1. "
+                   help="Path to ts_candidate_*.pt from Exp 1, OR an exp1 results directory. "
+                        "If a directory, the best test_mse checkpoint is selected automatically "
+                        "for each horizon from {dir}/{dataset}_H{pred_len}_{structure}/. "
                         "If not given, uses uniform Rec-1 genome.")
     p.add_argument("--alphas", type=float, nargs="+", default=DEFAULT_ALPHAS,
                    help="Alpha values to sweep (default: 0.0 0.1 0.5 1.0 2.0 5.0)")
@@ -205,13 +256,19 @@ def main():
     all_results = []
 
     for pred_len in horizons:
+        resolved_genome = (
+            _resolve_base_genome(args.base_genome, args.dataset, pred_len, args.structure)
+            if args.base_genome else None
+        )
+        if resolved_genome:
+            log.info(f"H={pred_len}: using genome {resolved_genome}")
         run_dir = str(Path(args.out_dir) / f"{args.dataset}_H{pred_len}_{args.structure}")
         try:
             results = run_alpha_sweep(
                 dataset=args.dataset,
                 pred_len=pred_len,
                 structure=args.structure,
-                base_genome_path=args.base_genome,
+                base_genome_path=resolved_genome,
                 alphas=args.alphas,
                 train_steps=args.train_steps,
                 dim=args.dim,

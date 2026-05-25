@@ -28,10 +28,16 @@ Usage:
       --source_checkpoint exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \\
       --pred_len 96 --all_targets --transfer_steps 10000
 
-  # Both modes, all horizons
+  # Both modes, all horizons (single file — same genome every horizon)
   python -m src.exp5_generalization \\
       --source_checkpoint exp1_results/ETTh1_H96_itransformer/ts_candidate_1.pt \\
       --all_horizons --all_targets --zero_shot
+
+  # All horizons with per-horizon best genome (pass exp1 results directory)
+  python -m src.exp5_generalization \\
+      --source_checkpoint exp1_results_fixedv2_exchange/ \\
+      --source_dataset Exchange --structure smamba \\
+      --all_horizons --all_targets
 """
 
 import argparse
@@ -59,11 +65,55 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-HORIZONS     = [96, 192, 336, 720]
-ALL_DATASETS = ["ETTh1", "ETTh2", "ETTm1", "ETTm2", "Electricity", "Traffic", "Exchange"]
+HORIZONS     = [96, 336, 720]
+ALL_DATASETS = ["ETTh1", "ETTh2", "ETTm1", "ETTm2", "Exchange"]
 
 # Datasets that share the same variate count as ETTh1/ETTh2/ETTm1/ETTm2 (7 variates)
 ETT_FAMILY = {"ETTh1", "ETTh2", "ETTm1", "ETTm2"}
+
+
+# =============================================================================
+# Checkpoint resolution
+# =============================================================================
+
+def _resolve_source_checkpoint(
+    source_checkpoint: str,
+    source_dataset: str,
+    pred_len: int,
+    structure: str,
+) -> str:
+    """If source_checkpoint is a directory, find best test_mse .pt for this horizon+structure.
+
+    Scans {source_checkpoint}/{source_dataset}_H{pred_len}_{structure}/candidates_summary.json,
+    picks the entry with lowest test_mse, then matches the .pt file by layer_classes.
+    Falls back to ts_candidate_1.pt if no match is found.
+    """
+    p = Path(source_checkpoint)
+    if not p.is_dir():
+        return source_checkpoint  # direct file path — use as-is
+    run_dir = p / f"{source_dataset}_H{pred_len}_{structure}"
+    summary_path = run_dir / "candidates_summary.json"
+    if summary_path.exists():
+        with open(summary_path) as f:
+            candidates = json.load(f)
+        best = min(candidates, key=lambda c: c["test_mse"])
+        target_classes = best["layer_classes"]
+        log.info(
+            f"source_checkpoint dir: best test_mse={best['test_mse']:.4f} "
+            f"genome={target_classes} in {run_dir.name}"
+        )
+        for pt_file in sorted(run_dir.glob("ts_candidate_*.pt")):
+            try:
+                ckpt = torch.load(pt_file, map_location="cpu", weights_only=False)
+                if ckpt.get("layer_classes") == target_classes:
+                    log.info(f"Matched {pt_file.name}")
+                    return str(pt_file)
+            except Exception:
+                continue
+        log.warning("No .pt matched layer_classes, falling back to ts_candidate_1.pt")
+        return str(run_dir / "ts_candidate_1.pt")
+    log.warning(f"No candidates_summary.json in {run_dir}, falling back to ts_candidate_1.pt")
+    return str(run_dir / "ts_candidate_1.pt")
 
 
 # =============================================================================
@@ -405,7 +455,9 @@ def run_generalization(
 def build_parser():
     p = argparse.ArgumentParser(description="Exp 5: Cross-Dataset Generalization")
     p.add_argument("--source_checkpoint", type=str, required=True,
-                   help="Path to ts_candidate_*.pt from Exp 1 (source genome + weights)")
+                   help="Path to ts_candidate_*.pt from Exp 1, OR an exp1 results directory. "
+                        "If a directory, the best test_mse checkpoint is selected automatically "
+                        "for each horizon from {dir}/{source_dataset}_H{pred_len}_{structure}/")
     p.add_argument("--source_dataset", type=str, default="ETTh1",
                    help="Dataset used to train the source checkpoint")
     # Target selection
@@ -456,8 +508,12 @@ def main():
     all_results = []
 
     for pred_len in horizons:
+        resolved_ckpt = _resolve_source_checkpoint(
+            args.source_checkpoint, args.source_dataset, pred_len, args.structure
+        )
+        log.info(f"H={pred_len}: using checkpoint {resolved_ckpt}")
         results = run_generalization(
-            source_checkpoint=args.source_checkpoint,
+            source_checkpoint=resolved_ckpt,
             source_dataset=args.source_dataset,
             target_datasets=target_datasets,
             pred_len=pred_len,

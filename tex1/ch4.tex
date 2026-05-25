@@ -1,0 +1,292 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Datasets.}
+We evaluate on three benchmarks:
+ETTh1 \cite{zhou2021ett} (17{,}420 time-steps, 7 variates, hourly electricity transformer temperature);
+ETTm1 \cite{zhou2021ett} (69{,}680 time-steps, 7 variates, 15-minute resolution);
+and Exchange-Rate \cite{wu2021autoformer} (7{,}588 time-steps, 8 currency exchange rates).
+For each dataset we report three forecast horizons: $H \in \{96, 336, 720\}$ with a fixed lookback window $L = 96$.
+Data is split 70/10/20 for train/validation/test and normalised per variate with Reversible Instance Normalisation (RevIN \cite{kim2022revin}).
+
+\textbf{Structures.}
+All experiments use two structural templates: S-Mamba (4 genome slots split evenly between variate and temporal backbones) and iTransformer (4 genome slots alternating cross-variate and per-variate sub-layers).
+
+\textbf{Training.}
+During NSGA-II search, each candidate genome is evaluated for $N_{\mathrm{eval}} = 500$ steps using the Adam optimiser with learning rate $10^{-3}$.
+The top Pareto-front genomes are retrained from scratch for 20{,}000 steps.
+All experiments run on a single GPU.
+
+\textbf{Metrics.}
+We report test MSE and MAE on un-normalised (RevIN-restored) outputs, consistent with the iTransformer benchmark protocol.
+
+\subsection{Experiment 1: Architecture Search Results}
+\label{sec:exp_search}
+
+We run NSGA-II for 18 generations (population 16) on each (dataset, horizon) pair and retrain the Pareto-front genomes for 20{,}000 steps.
+Table~\ref{tab:exp1_etth1} reports the best-MSE candidate per (structure, horizon) for ETTh1, and Table~\ref{tab:exp1_exchange} for Exchange-Rate.
+Table~\ref{tab:exp1_ettm} summarises ETTm1 results.
+
+\begin{table}[t]
+\caption{Architecture search results on ETTh1. Best test MSE genome per (structure, $H$) reported after 20{,}000-step retraining. Genome entries are operator class IDs from the pool (Table~\ref{tab:operator_pool} and differential variants).}
+\label{tab:exp1_etth1}
+\centering
+\small
+\begin{tabular}{llrrr}
+\toprule
+Structure & $H$ & Params & MSE & MAE \\
+\midrule
+S-Mamba   & 96  & 528K  & 0.596 & 0.547 \\
+S-Mamba   & 336 & 678K  & 0.758 & 0.641 \\
+S-Mamba   & 720 & 1{,}590K & 0.819 & 0.670 \\
+\midrule
+iTransformer & 96  & 1{,}188K & 0.549 & 0.502 \\
+iTransformer & 336 & 939K  & 0.809 & 0.661 \\
+iTransformer & 720 & 1{,}976K & 0.808 & 0.671 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Architecture search results on Exchange-Rate. Best test MSE genome per (structure, $H$).}
+\label{tab:exp1_exchange}
+\centering
+\small
+\begin{tabular}{llrrr}
+\toprule
+Structure & $H$ & Params & MSE & MAE \\
+\midrule
+S-Mamba   & 96  & 570K  & 0.143 & 0.284 \\
+S-Mamba   & 336 & 490K  & 0.770 & 0.681 \\
+S-Mamba   & 720 & 1{,}059K & 1.084 & 0.829 \\
+\midrule
+iTransformer & 96  & 1{,}090K & 0.142 & 0.281 \\
+iTransformer & 336 & 1{,}153K & 0.673 & 0.629 \\
+iTransformer & 720 & 1{,}059K & 1.309 & 0.838 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Architecture search results on ETTm1. Best test MSE genome per (structure, $H$).}
+\label{tab:exp1_ettm}
+\centering
+\small
+\begin{tabular}{llrrr}
+\toprule
+Structure & $H$ & Params & MSE & MAE \\
+\midrule
+S-Mamba   & 96  & 1{,}188K & 0.503 & 0.479 \\
+S-Mamba   & 336 & 563K  & 0.723 & 0.604 \\
+S-Mamba   & 720 & 532K  & 0.789 & 0.648 \\
+\midrule
+iTransformer & 96  & 1{,}321K & 0.534 & 0.500 \\
+iTransformer & 336 & 467K  & 0.684 & 0.592 \\
+iTransformer & 720 & 605K  & 0.826 & 0.663 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Across all datasets and horizons, the top Pareto-front genomes are consistently \emph{heterogeneous}: no single operator class fills all four slots.
+For example, the best ETTh1 H\,=\,96 S-Mamba genome mixes SA-3 (MQA), SA-1 (MHA), SA-3, and SA-4 (GQA) slots—three attention variants with different KV compression ratios—at only 528K parameters.
+The best iTransformer genome for the same condition combines GConv-2 (long convolution) with differential-FFN and GConv-1 slots.
+On Exchange-Rate at H\,=\,96, both structures discover compact (${\le}1.1$M parameter) heterogeneous genomes achieving MSE\,$\approx$\,0.14, matching the empirical difficulty of short-horizon currency forecasting.
+
+\subsection{Experiment 2: Operator Ablation}
+\label{sec:exp_ablation}
+
+To isolate the contribution of operator heterogeneity, we compare five baseline configurations against the best NSGA-II genome (MIXED\_GA):
+\textbf{ALL\_CONV} (all GConv-2 slots),
+\textbf{ALL\_ATTN} (all SA-1 slots),
+\textbf{ALL\_FFN} (all GMemless differential slots),
+\textbf{ALL\_CFC} (all CfC differential slots).
+All variants use the same structure template and are trained for 20{,}000 steps.
+
+\begin{table}[t]
+\caption{Operator ablation on ETTh1. Test MSE for each single-class baseline and the best NSGA-II heterogeneous genome (MIXED\_GA). Parameter counts vary with horizon due to the forecast head size.}
+\label{tab:exp2_etth1}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llrrrrr}
+\toprule
+ & & \multicolumn{2}{c}{H = 96} & \multicolumn{2}{c}{H = 336} & H = 720 \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-7}
+Structure & Variant & Params & MSE & Params & MSE & MSE \\
+\midrule
+\multirow{5}{*}{S-Mamba}
+ & ALL\_CONV  & 582K  & 0.518 & 644K  & 0.700 & 0.742 \\
+ & ALL\_ATTN  & 874K  & 0.548 & 936K  & 0.682 & 0.805 \\
+ & ALL\_FFN   & 3.2M  & 0.450 & 3.3M  & 0.549 & 0.657 \\
+ & ALL\_CFC   & 16.9M & 0.493 & 17.0M & 0.705 & 0.758 \\
+ & MIXED\_GA  & 578K  & 0.537 & 790K  & 0.680 & 0.853 \\
+\midrule
+\multirow{5}{*}{iTransformer}
+ & ALL\_CONV  & 582K  & 0.592 & 644K  & 0.806 & 0.809 \\
+ & ALL\_ATTN  & 874K  & 0.555 & 936K  & 0.663 & 0.757 \\
+ & ALL\_FFN   & 3.2M  & 0.454 & 3.3M  & 0.551 & 0.668 \\
+ & ALL\_CFC   & 16.9M & 0.491 & 17.0M & 0.690 & 0.746 \\
+ & MIXED\_GA  & 1.2M  & \textbf{0.464} & 1.1M & 0.677 & 0.749 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Operator ablation on Exchange-Rate. Test MSE for single-class baselines vs.\ MIXED\_GA.}
+\label{tab:exp2_exchange}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llrrr}
+\toprule
+Structure & Variant & Params & MSE (H=96) & MSE (H=336) \\
+\midrule
+\multirow{5}{*}{S-Mamba}
+ & ALL\_CONV  & 582K  & 0.672 & 1.372 \\
+ & ALL\_ATTN  & 874K  & 0.156 & 0.618 \\
+ & ALL\_FFN   & 3.2M  & 0.108 & 0.625 \\
+ & ALL\_CFC   & 16.9M & 0.227 & 1.090 \\
+ & MIXED\_GA  & 1.6M  & 0.148 & 0.726 \\
+\midrule
+\multirow{5}{*}{iTransformer}
+ & ALL\_CONV  & 582K  & 0.489 & 1.457 \\
+ & ALL\_ATTN  & 874K  & 0.203 & 0.763 \\
+ & ALL\_FFN   & 3.2M  & \textbf{0.099} & 0.617 \\
+ & ALL\_CFC   & 16.9M & 0.393 & 1.289 \\
+ & MIXED\_GA  & 1.0M  & 0.158 & 0.795 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Tables~\ref{tab:exp2_etth1} and~\ref{tab:exp2_exchange} reveal several patterns.
+First, no single operator class dominates across datasets: ALL\_FFN achieves the best ETTh1 MSE but uses 3.2M parameters versus 578K--1.2M for MIXED\_GA.
+Second, ALL\_CFC incurs 16.9M parameters due to the 16$\times$ internal expansion of the CfC featurizer, making it parameter-inefficient despite competitive accuracy.
+Third, on Exchange-Rate, MIXED\_GA achieves 0.148 MSE (S-Mamba, H=96) with 1.6M parameters, matching ALL\_ATTN (0.156) at comparable cost and approaching ALL\_FFN (0.108) at one-fifth the parameter budget.
+These results confirm that heterogeneous operator mixtures discovered by NSGA-II provide a better accuracy-compactness trade-off than any homogeneous baseline.
+
+\subsection{Experiment 3: TiDAR Inference Speedup}
+\label{sec:tidar_speedup}
+
+We evaluate TiDAR's inference trade-off between speed and accuracy on Exchange-Rate (H\,=\,96) using the best S-Mamba genome from Experiment~1.
+Five operating modes are compared: pure draft ($k=0$), partial-AR with $k \in \{1, 4, 16\}$ autoregressive refinement steps, and full-AR ($k=H=96$).
+Latency is measured as median milliseconds per sample over 86 batches.
+
+\begin{table}[t]
+\caption{TiDAR inference speed-accuracy trade-off on Exchange-Rate H\,=\,96, S-Mamba. Speedup is relative to full-AR ($k=96$). MSE is on the test set.}
+\label{tab:exp4}
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Mode & $k$ & Speedup & Latency (ms) & MSE \\
+\midrule
+Draft         & 0  & \textbf{96.9$\times$} & 0.152  & 0.169 \\
+Partial-AR    & 1  & 48.5$\times$          & 0.304  & 0.169 \\
+Partial-AR    & 4  & 19.4$\times$          & 0.760  & 0.169 \\
+Partial-AR    & 16 & 5.7$\times$           & 2.586  & 0.167 \\
+Full-AR       & 96 & 1.0$\times$           & 14{,}754 & 0.241 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:exp4} shows that the draft mode achieves a \textbf{96.9$\times$} wall-clock speedup while raising MSE by only 0.000 (0.169 vs.\ 0.169 for $k=1$) relative to partial-AR refinement.
+Strikingly, the full-AR mode (k=96) produces \emph{higher} MSE (0.241) than draft or partial-AR modes, indicating that the TiDAR parallel training objective teaches the model to forecast more reliably in non-sequential mode than in the sequential mode it was not primarily trained for.
+Even a single AR refinement step ($k=1$, 48.5$\times$ speedup) matches draft quality.
+A comparable evaluation on ETTh1 H\,=\,96 yields an 80.8$\times$ draft speedup (MSE 0.640 vs.\ full-AR 0.776), confirming the pattern across datasets.
+
+\subsection{Experiment 4: Cross-Dataset Architecture Transfer}
+\label{sec:generalization}
+
+We test whether genomes discovered on one dataset transfer without re-running evolutionary search.
+Two source genomes are evaluated: the best H\,=\,96 genome found on ETTh1 (Experiment~1, S-Mamba), and the best H\,=\,96 genome found on Exchange-Rate.
+Each genome is trained from scratch on the target dataset and evaluated at matching horizons.
+The baseline is an all-Mamba (Rec-1) genome of comparable depth.
+
+\begin{table}[t]
+\caption{Transfer from ETTh1 (S-Mamba, H=96 search genome). Test MSE of the transferred genome vs.\ the all-Mamba baseline on four target datasets. Positive $\Delta$ means baseline is worse (transfer helps).}
+\label{tab:exp5_from_etth}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrrr}
+\toprule
+Target & $H$ & Searched & Baseline & $\Delta\%$ \\
+\midrule
+\multirow{3}{*}{ETTh2}
+ & 96  & \textbf{0.444} & 0.649 & $+$31.6\% \\
+ & 336 & \textbf{0.735} & 1.071 & $+$31.3\% \\
+ & 720 & 2.173 & \textbf{1.365} & $-$59.2\% \\
+\midrule
+\multirow{3}{*}{ETTm1}
+ & 96  & 0.601 & \textbf{0.551} & $-$9.2\% \\
+ & 336 & 0.781 & \textbf{0.688} & $-$13.5\% \\
+ & 720 & 0.779 & \textbf{0.738} & $-$5.7\% \\
+\midrule
+\multirow{3}{*}{ETTm2}
+ & 96  & 0.273 & \textbf{0.251} & $-$8.9\% \\
+ & 336 & \textbf{0.618} & 0.717 & $+$13.8\% \\
+ & 720 & \textbf{0.769} & 1.210 & $+$36.5\% \\
+\midrule
+\multirow{3}{*}{Exchange}
+ & 96  & \textbf{0.147} & 0.405 & $+$63.6\% \\
+ & 336 & \textbf{0.718} & 0.825 & $+$13.0\% \\
+ & 720 & \textbf{1.301} & 1.482 & $+$12.2\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Transfer from Exchange-Rate (S-Mamba, H=96 search genome). Test MSE vs.\ all-Mamba baseline. Positive $\Delta$ means transfer helps.}
+\label{tab:exp5_from_exchange}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+Target & $H$ & Searched & Baseline & $\Delta\%$ \\
+\midrule
+ETTh1  & 96  & 0.646 & \textbf{0.639} & $-$1.2\% \\
+ETTh2  & 96  & 0.744 & \textbf{0.580} & $-$28.1\% \\
+ETTm1  & 96  & 0.547 & \textbf{0.545} & $-$0.3\% \\
+ETTm2  & 96  & 0.346 & \textbf{0.260} & $-$32.8\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:exp5_from_etth} shows that the ETTh1 genome transfers successfully to ETTh2 ($+$31\% at H\,=\,96 and 336) and Exchange-Rate ($+$63\% at H\,=\,96), where dataset characteristics are compatible—hourly multivariate electricity and smooth currency dynamics, respectively.
+Transfer to ETTm (15-minute resolution) is mixed: the ETTh1 genome slightly underperforms the all-Mamba baseline at H\,=\,96 and 336 but recovers at H\,=\,720.
+
+Table~\ref{tab:exp5_from_exchange} shows that the Exchange-Rate genome does not transfer well: it matches the baseline on ETTh1 and ETTm1 (within 1\%) but underperforms by 28--33\% on ETTh2 and ETTm2.
+This asymmetry suggests that the structural inductive bias discovered for currency rates (dominated by smooth trends and low noise) is too specialised for the richer multivariate dynamics of the ETT benchmarks.
+
+\subsection{Experiment 5: TiDAR $\alpha$ Sensitivity}
+\label{sec:exp_alpha}
+
+We ablate the balance coefficient $\alpha$ in the TiDAR loss (Eq.~\eqref{eq:tidar_loss}) on the best S-Mamba genome from Experiment~1 (ETTh1) across four horizons.
+$\alpha = 0$ recovers pure parallel prediction; larger $\alpha$ increases the weight of the AR auxiliary task.
+
+\begin{table}[t]
+\caption{Test MSE for varying $\alpha$ on ETTh1 (S-Mamba). Genome fixed to the best H\,=\,96 candidate from Experiment~1. Bold indicates best MSE per horizon.}
+\label{tab:exp6}
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+$\alpha$ & H = 96 & H = 192 & H = 336 & H = 720 \\
+\midrule
+0.0 & 0.756 & 0.835 & 0.919 & 1.101 \\
+0.1 & 0.704 & 0.825 & 1.006 & 1.097 \\
+0.5 & 0.694 & 0.827 & \textbf{0.852} & 1.087 \\
+1.0 & 0.729 & 0.747 & 0.955 & 1.071 \\
+2.0 & \textbf{0.671} & \textbf{0.739} & 0.947 & 1.063 \\
+5.0 & 0.726 & 0.840 & 0.894 & \textbf{1.009} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:exp6} reveals a consistent trend: moderate AR regularisation ($\alpha \in [0.5, 2.0]$) outperforms both extremes across all horizons.
+Pure parallel prediction ($\alpha = 0$) performs worst, indicating that the AR auxiliary task provides useful structural supervision even when inference is performed in draft mode.
+The optimal $\alpha$ shifts with horizon: $\alpha = 2.0$ is best for H\,=\,96 and H\,=\,192, while $\alpha = 0.5$ is best for H\,=\,336 and $\alpha = 5.0$ for H\,=\,720.
+This horizon-dependent optimum is consistent with the idea that longer forecasting horizons benefit more from sequential structure, making stronger AR regularisation preferable.

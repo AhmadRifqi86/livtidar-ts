@@ -1,0 +1,182 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{wu2021autoformer,zhou2021informer}
+\citation{liu2024itransformer}
+\citation{wang2024smamba}
+\citation{elsken2019neural,zoph2017neural}
+\citation{thomas2024star,massaroli2024liv}
+\providecommand \oddpage@label [2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{I}{1}{Introduction}{section.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {I-A}}Motivation: Why Fixed Operator Choices May Be Suboptimal}{1}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {I-B}}Our Approach: LIV-TS}{1}{subsection.1.2}\protected@file@percent }
+\citation{deb2002nsga2}
+\citation{tidar2024}
+\citation{hasani2022liquid}
+\citation{zhou2021informer}
+\citation{wu2021autoformer}
+\citation{liu2024itransformer}
+\citation{wang2024smamba}
+\citation{zeng2023dlinear}
+\citation{nie2023patchtst}
+\citation{wu2023timesnet}
+\citation{thomas2024star,massaroli2024liv}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {I-C}}Contributions}{2}{subsection.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {I-D}}Paper Organization}{2}{subsection.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {II}Background and Related Work}{2}{section.2}\protected@file@percent }
+\newlabel{sec:background}{{II}{2}{Background and Related Work}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-A}}Time Series Forecasting Architectures}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-B}}Linear Input-Varying (LIV) Operators}{2}{subsection.2.2}\protected@file@percent }
+\newlabel{eq:featurizer}{{1}{2}{Linear Input-Varying (LIV) Operators}{equation.2.1}{}}
+\citation{vaswani2017attention}
+\citation{hasani2021cfc}
+\citation{poli2023hyena}
+\citation{shazeer2020glu}
+\citation{gu2021s4}
+\citation{gu2023mamba}
+\citation{hasani2021cfc}
+\citation{hasani2022liquid}
+\newlabel{eq:tij}{{2}{3}{Linear Input-Varying (LIV) Operators}{equation.2.2}{}}
+\newlabel{eq:token_mix}{{3}{3}{Linear Input-Varying (LIV) Operators}{equation.2.3}{}}
+\newlabel{eq:channel_mix}{{4}{3}{Linear Input-Varying (LIV) Operators}{equation.2.4}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {II-B}1}Token Mixing Families}{3}{subsubsection.2.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-C}}Recurrent Sequence Models}{3}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-D}}CfC-LNN and its LIV Representation}{3}{subsection.2.4}\protected@file@percent }
+\newlabel{sec:cfc_liv}{{\mbox  {II-D}}{3}{CfC-LNN and its LIV Representation}{subsection.2.4}{}}
+\newlabel{eq:cfc_recurrence}{{9}{3}{CfC-LNN and its LIV Representation}{equation.2.9}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {II-D}1}CfC as a SEMI\_SEPARABLE LIV Block}{3}{subsubsection.2.4.1}\protected@file@percent }
+\newlabel{eq:cfc_unrolled}{{10}{3}{CfC as a SEMI\_SEPARABLE LIV Block}{equation.2.10}{}}
+\citation{deb2002nsga2}
+\citation{tidar2024}
+\citation{elsken2019neural}
+\citation{zoph2017neural}
+\citation{gu2023mamba}
+\citation{poli2023hyena}
+\citation{thomas2024star,massaroli2024liv}
+\citation{gu2018nonautoregressive}
+\citation{tidar2024}
+\citation{shazeer2019mqattn}
+\citation{ainslie2023gqa}
+\citation{hasani2021cfc}
+\citation{gu2023mamba}
+\citation{gu2021s4}
+\newlabel{eq:cfc_featurizer}{{11}{4}{CfC as a SEMI\_SEPARABLE LIV Block}{equation.2.11}{}}
+\newlabel{eq:cfc_tij}{{12}{4}{CfC as a SEMI\_SEPARABLE LIV Block}{equation.2.12}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-E}}NSGA-II}{4}{subsection.2.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-F}}TiDAR: Think-in-Diffusion Autoregressive Prediction}{4}{subsection.2.6}\protected@file@percent }
+\newlabel{eq:tidar_loss}{{13}{4}{TiDAR: Think-in-Diffusion Autoregressive Prediction}{equation.2.13}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-G}}Related Work}{4}{subsection.2.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {III}LIV-TS Methodology}{4}{section.3}\protected@file@percent }
+\newlabel{sec:method}{{III}{4}{LIV-TS Methodology}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-A}}LIV-TS Operator Pool}{4}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:pool}{{\mbox  {III-A}}{4}{LIV-TS Operator Pool}{subsection.3.1}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-A}1}Attention Family (LOW\_RANK)}{4}{subsubsection.3.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-A}2}Recurrence Family (SEMI\_SEPARABLE)}{4}{subsubsection.3.1.2}\protected@file@percent }
+\citation{poli2023hyena}
+\citation{wang2024smamba}
+\citation{liu2024itransformer}
+\citation{kim2022revin}
+\citation{tidar2024}
+\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces LIV-TS operator pool. Expansion refers to the ratio of internal dimension to model dimension $d$.\relax }}{5}{table.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:operator_pool}{{I}{5}{LIV-TS operator pool. Expansion refers to the ratio of internal dimension to model dimension $d$.\relax }{table.caption.1}{}}
+\newlabel{eq:cfc_feat}{{14}{5}{Recurrence Family (SEMI\_SEPARABLE)}{equation.3.14}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-A}3}Convolution Family (TOEPLITZ)}{5}{subsubsection.3.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-A}4}Memoryless Family (DIAGONAL)}{5}{subsubsection.3.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-A}5}Differential Variants}{5}{subsubsection.3.1.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-B}}Genome Encoding}{5}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:genome}{{\mbox  {III-B}}{5}{Genome Encoding}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-C}}Structural Instantiation}{5}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:structures}{{\mbox  {III-C}}{5}{Structural Instantiation}{subsection.3.3}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-C}1}S-Mamba Instantiation}{5}{subsubsection.3.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-C}2}iTransformer Instantiation}{5}{subsubsection.3.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-D}}TiDAR-TS Adaptation}{5}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:tidar_adapt}{{\mbox  {III-D}}{5}{TiDAR-TS Adaptation}{subsection.3.4}{}}
+\citation{zhou2021ett}
+\citation{zhou2021ett}
+\citation{wu2021autoformer}
+\citation{kim2022revin}
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces NSGA-II search configuration.\relax }}{6}{table.caption.2}\protected@file@percent }
+\newlabel{tab:nsga_config}{{II}{6}{NSGA-II search configuration.\relax }{table.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-E}}NSGA-II Search Protocol}{6}{subsection.3.5}\protected@file@percent }
+\newlabel{sec:search}{{\mbox  {III-E}}{6}{NSGA-II Search Protocol}{subsection.3.5}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-E}1}Objectives}{6}{subsubsection.3.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-E}2}Search Configuration}{6}{subsubsection.3.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-E}3}Mutation and Crossover}{6}{subsubsection.3.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-F}}Overall Pipeline}{6}{subsection.3.6}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Architecture search results on ETTh1. Best test MSE genome per (structure, $H$) reported after 20{,}000-step retraining. Genome entries are operator class IDs from the pool (Table\nobreakspace  {}\ref  {tab:operator_pool} and differential variants).\relax }}{6}{table.caption.3}\protected@file@percent }
+\newlabel{tab:exp1_etth1}{{III}{6}{Architecture search results on ETTh1. Best test MSE genome per (structure, $H$) reported after 20{,}000-step retraining. Genome entries are operator class IDs from the pool (Table~\ref {tab:operator_pool} and differential variants).\relax }{table.caption.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Architecture search results on Exchange-Rate. Best test MSE genome per (structure, $H$).\relax }}{6}{table.caption.4}\protected@file@percent }
+\newlabel{tab:exp1_exchange}{{IV}{6}{Architecture search results on Exchange-Rate. Best test MSE genome per (structure, $H$).\relax }{table.caption.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {IV}Experiments}{6}{section.4}\protected@file@percent }
+\newlabel{sec:experiments}{{IV}{6}{Experiments}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-A}}Experimental Setup}{6}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Experiment 1: Architecture Search Results}{6}{subsection.4.2}\protected@file@percent }
+\newlabel{sec:exp_search}{{\mbox  {IV-B}}{6}{Experiment 1: Architecture Search Results}{subsection.4.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {V}{\ignorespaces Architecture search results on ETTm1. Best test MSE genome per (structure, $H$).\relax }}{7}{table.caption.5}\protected@file@percent }
+\newlabel{tab:exp1_ettm}{{V}{7}{Architecture search results on ETTm1. Best test MSE genome per (structure, $H$).\relax }{table.caption.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {VI}{\ignorespaces Operator ablation on ETTh1. Test MSE for each single-class baseline and the best NSGA-II heterogeneous genome (MIXED\_GA). Parameter counts vary with horizon due to the forecast head size.\relax }}{7}{table.caption.6}\protected@file@percent }
+\newlabel{tab:exp2_etth1}{{VI}{7}{Operator ablation on ETTh1. Test MSE for each single-class baseline and the best NSGA-II heterogeneous genome (MIXED\_GA). Parameter counts vary with horizon due to the forecast head size.\relax }{table.caption.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-C}}Experiment 2: Operator Ablation}{7}{subsection.4.3}\protected@file@percent }
+\newlabel{sec:exp_ablation}{{\mbox  {IV-C}}{7}{Experiment 2: Operator Ablation}{subsection.4.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {VII}{\ignorespaces Operator ablation on Exchange-Rate. Test MSE for single-class baselines vs.\ MIXED\_GA.\relax }}{7}{table.caption.7}\protected@file@percent }
+\newlabel{tab:exp2_exchange}{{VII}{7}{Operator ablation on Exchange-Rate. Test MSE for single-class baselines vs.\ MIXED\_GA.\relax }{table.caption.7}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {VIII}{\ignorespaces TiDAR inference speed-accuracy trade-off on Exchange-Rate H\,=\,96, S-Mamba. Speedup is relative to full-AR ($k=96$). MSE is on the test set.\relax }}{7}{table.caption.8}\protected@file@percent }
+\newlabel{tab:exp4}{{VIII}{7}{TiDAR inference speed-accuracy trade-off on Exchange-Rate H\,=\,96, S-Mamba. Speedup is relative to full-AR ($k=96$). MSE is on the test set.\relax }{table.caption.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Experiment 3: TiDAR Inference Speedup}{7}{subsection.4.4}\protected@file@percent }
+\newlabel{sec:tidar_speedup}{{\mbox  {IV-D}}{7}{Experiment 3: TiDAR Inference Speedup}{subsection.4.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-E}}Experiment 4: Cross-Dataset Architecture Transfer}{7}{subsection.4.5}\protected@file@percent }
+\newlabel{sec:generalization}{{\mbox  {IV-E}}{7}{Experiment 4: Cross-Dataset Architecture Transfer}{subsection.4.5}{}}
+\bibstyle{IEEEtran}
+\bibdata{reference}
+\bibcite{wu2021autoformer}{1}
+\bibcite{zhou2021informer}{2}
+\bibcite{liu2024itransformer}{3}
+\bibcite{wang2024smamba}{4}
+\bibcite{elsken2019neural}{5}
+\bibcite{zoph2017neural}{6}
+\bibcite{poli2023hyena}{7}
+\bibcite{deb2002nsga2}{8}
+\bibcite{tidar2024}{9}
+\bibcite{hasani2022liquid}{10}
+\bibcite{zeng2023dlinear}{11}
+\bibcite{nie2023patchtst}{12}
+\bibcite{wu2023timesnet}{13}
+\bibcite{thomas2024star}{14}
+\bibcite{massaroli2024liv}{15}
+\bibcite{vaswani2017attention}{16}
+\bibcite{hasani2021cfc}{17}
+\bibcite{shazeer2020glu}{18}
+\bibcite{gu2021s4}{19}
+\bibcite{gu2023mamba}{20}
+\bibcite{gu2018nonautoregressive}{21}
+\@writefile{lot}{\contentsline {table}{\numberline {IX}{\ignorespaces Transfer from ETTh1 (S-Mamba, H=96 search genome). Test MSE of the transferred genome vs.\ the all-Mamba baseline on four target datasets. Positive $\Delta $ means baseline is worse (transfer helps).\relax }}{8}{table.caption.9}\protected@file@percent }
+\newlabel{tab:exp5_from_etth}{{IX}{8}{Transfer from ETTh1 (S-Mamba, H=96 search genome). Test MSE of the transferred genome vs.\ the all-Mamba baseline on four target datasets. Positive $\Delta $ means baseline is worse (transfer helps).\relax }{table.caption.9}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {X}{\ignorespaces Transfer from Exchange-Rate (S-Mamba, H=96 search genome). Test MSE vs.\ all-Mamba baseline. Positive $\Delta $ means transfer helps.\relax }}{8}{table.caption.10}\protected@file@percent }
+\newlabel{tab:exp5_from_exchange}{{X}{8}{Transfer from Exchange-Rate (S-Mamba, H=96 search genome). Test MSE vs.\ all-Mamba baseline. Positive $\Delta $ means transfer helps.\relax }{table.caption.10}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-F}}Experiment 5: TiDAR $\alpha $ Sensitivity}{8}{subsection.4.6}\protected@file@percent }
+\newlabel{sec:exp_alpha}{{\mbox  {IV-F}}{8}{Experiment 5: TiDAR $\alpha $ Sensitivity}{subsection.4.6}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {XI}{\ignorespaces Test MSE for varying $\alpha $ on ETTh1 (S-Mamba). Genome fixed to the best H\,=\,96 candidate from Experiment\nobreakspace  {}1. Bold indicates best MSE per horizon.\relax }}{8}{table.caption.11}\protected@file@percent }
+\newlabel{tab:exp6}{{XI}{8}{Test MSE for varying $\alpha $ on ETTh1 (S-Mamba). Genome fixed to the best H\,=\,96 candidate from Experiment~1. Bold indicates best MSE per horizon.\relax }{table.caption.11}{}}
+\@writefile{toc}{\contentsline {section}{References}{8}{section*.12}\protected@file@percent }
+\bibcite{shazeer2019mqattn}{22}
+\bibcite{ainslie2023gqa}{23}
+\bibcite{kim2022revin}{24}
+\bibcite{zhou2021ett}{25}
+\gdef \@abspage@last{9}

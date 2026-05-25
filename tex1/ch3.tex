@@ -1,0 +1,220 @@
+\section{LIV-TS Methodology}
+\label{sec:method}
+
+LIV-TS has three components: (1) an \emph{operator pool} of LIV classes that form the search alphabet; (2) two \emph{structural templates} that specify how operator slots are arranged within a forecasting model; and (3) a \emph{search and training protocol} combining NSGA-II evolution with TiDAR-TS parallel training.
+Figure~\ref{fig:overview} illustrates the overall pipeline.
+
+\subsection{LIV-TS Operator Pool}
+\label{sec:pool}
+
+We select eleven base operator classes spanning all four LIV token-mixing families.
+Each class pairs a featurizer (how $B$, $C$, $V$ are computed from $x$) with a token-mix type (the structure of $M_{ij}$) and a channel-mix type (the structure of $W$).
+Table~\ref{tab:operator_pool} lists the full pool.
+
+\subsubsection{Attention Family (LOW\_RANK)}
+
+All attention variants use $T = CB^\top/\sqrt{d}$ with softmax normalisation.
+They differ in how the key ($B$), query ($C$), and value ($V$) projections are computed, trading parameter count against expressiveness.
+
+\textbf{SA-1 — Standard Multi-Head Attention.}
+All heads use independent key, query, and value projections over the full dimension $d$.
+Channel mixing is GROUPED (one projection per head).
+
+\textbf{SA-2 — Convolution-Pre MHA.}
+A causal depthwise Conv1d (kernel size 3) is applied to $x$ before all projections, injecting local context into each attention head without additional parameters.
+
+\textbf{SA-3 — Multi-Query Attention \cite{shazeer2019mqattn}.}
+A single shared key-value head is broadcast to all $h$ query heads, reducing KV parameter count to $1/h$ of MHA at the cost of representational capacity.
+
+\textbf{SA-4 — Grouped-Query Attention \cite{ainslie2023gqa}.}
+$h/2$ KV head groups, each serving two query heads.
+This interpolates between MHA (full expressiveness) and MQA (maximal compression).
+
+\subsubsection{Recurrence Family (SEMI\_SEPARABLE)}
+
+We use a single SEMI\_SEPARABLE operator: \textbf{Rec-4 (CfC)}, the Closed-form Continuous-time network \cite{hasani2021cfc}.
+SSM variants such as Mamba \cite{gu2023mamba} and S4 \cite{gu2021s4} also map to SEMI\_SEPARABLE and are included in the pool as ablation baselines (Section~\ref{sec:exp_ablation}), but CfC is the sole recurrence operator carried through to the main search and transfer experiments.
+
+\textbf{Rec-4 — CfC.}
+The featurizer computes complementary forget and input gates from each token:
+\begin{equation}
+  g_t = \sigma(W_g\,x_t + b_g), \quad
+  \mathbf{b}_t = (1 - g_t) \odot W_{\mathrm{in}}\,x_t, \quad
+  \mathbf{a}_t = g_t,
+  \label{eq:cfc_feat}
+\end{equation}
+with internal expansion $16\times$ and DIAGONAL channel mixing.
+The constraint $g_t + (1-g_t)=1$ is satisfied by construction; no additional learnable bias $a_{\log}$ is required.
+As shown in Section~\ref{sec:cfc_liv}, substituting Eq.~\eqref{eq:cfc_feat} into the SEMI\_SEPARABLE $T_{ij}$ formula recovers precisely the unrolled CfC recurrence.
+
+\subsubsection{Convolution Family (TOEPLITZ)}
+
+Both convolution variants use $T_{ij} = C_i K_{i-j} B_j$ with sigmoid gates for $B$ and $C$.
+Channel mixing is DIAGONAL.
+The value projection is the raw input ($V = x$), keeping parameter count low.
+
+\textbf{GConv-1 — Short Gated Convolution.}
+The kernel $K \in \mathbb{R}^{d \times 3}$ is a fixed learned parameter shared across all inputs.
+The 3-tap window captures immediate neighbourhood structure at minimal cost.
+
+\textbf{GConv-2 — Long Input-Dependent Convolution.}
+Following the Hyena implicit-kernel approach \cite{poli2023hyena}, a two-layer MLP generates a 64-tap kernel from the global average of the input:
+\begin{equation}
+  K = \mathrm{MLP}(\mathrm{mean}(x)) \in \mathbb{R}^{d \times 64}.
+\end{equation}
+The kernel depends on the current sequence, providing global context awareness at $\mathcal{O}(Ld)$ cost.
+
+\subsubsection{Memoryless Family (DIAGONAL)}
+
+\textbf{GMemless — SwiGLU FFN.}
+Element-wise gating with $4\times$ internal expansion:
+\begin{equation}
+  \mathrm{out}_i = \mathrm{SiLU}(W_{\mathrm{gate}} x_i) \odot (W_{\mathrm{val}} x_i).
+\end{equation}
+Channel mixing is DENSE (full output projection).
+No cross-token interaction; each position is processed independently.
+
+\subsubsection{Differential Variants}
+
+Every base class $c \in [1,9]$ has a \emph{differential} counterpart $c + 9 \in [10, 18]$, making a pool of 18 operator classes in total (plus Rec-3 and Rec-4 differentials at classes 19--21 for the extended pool).
+A differential operator instantiates \emph{two} independent featurizers with the same class and computes their difference before channel mixing:
+\begin{equation}
+  \mathrm{mixed}^{\mathrm{diff}}_i = \mathrm{LIV}_1(x)_i - \mathrm{LIV}_2(x)_i.
+\end{equation}
+This doubles expressiveness at approximately $2\times$ the parameter cost and can be interpreted as a learned contrast between two distinct views of the input.
+
+\begin{table}[t]
+\caption{LIV-TS operator pool. Expansion refers to the ratio of internal dimension to model dimension $d$.}
+\label{tab:operator_pool}
+\centering
+\small
+\begin{tabular}{clllc}
+\toprule
+ID & Name & Token Mix & Channel Mix & Expansion \\
+\midrule
+1  & SA-1 (MHA)      & LOW\_RANK       & GROUPED  & $1\times$ \\
+2  & SA-2 (Conv-MHA) & LOW\_RANK       & GROUPED  & $1\times$ \\
+3  & SA-3 (MQA)      & LOW\_RANK       & GROUPED  & $1\times$ \\
+4  & SA-4 (GQA)      & LOW\_RANK       & GROUPED  & $1\times$ \\
+5  & Rec-4 (CfC)     & SEMI\_SEPARABLE & DIAGONAL & $16\times$ \\
+6  & GConv-1         & TOEPLITZ        & DIAGONAL & $1\times$ \\
+7  & GConv-2         & TOEPLITZ        & DIAGONAL & $1\times$ \\
+8  & GMemless (FFN)  & DIAGONAL        & DENSE    & $4\times$ \\
+\bottomrule
+\multicolumn{5}{l}{\small Classes 9--16 are differential variants of the above (compute LIV$_1(x)-$LIV$_2(x)$).}
+\end{tabular}
+\end{table}
+
+\subsection{Genome Encoding}
+\label{sec:genome}
+
+A genome $g$ is a fixed-length list of integer operator class IDs, one per \emph{slot} in the model.
+Each slot corresponds to one LIV block sub-layer.
+With $N$ total blocks the genome length is $N$ for iTransformer and $N$ for S-Mamba (both structures have one active LIV class per block, but the slot \emph{role} differs by structure as described below).
+
+The channel-mix type is not searched independently: it is derived deterministically from the token-mix family of the selected class, following the pairing in Table~\ref{tab:operator_pool}.
+This reduces the search space from $|\text{pool}|^N \times 3^N$ to $|\text{pool}|^N$.
+
+\subsection{Structural Instantiation}
+\label{sec:structures}
+
+\subsubsection{S-Mamba Instantiation}
+
+The S-Mamba structure embeds each variate's $L$-step history as a $D$-dimensional token and processes $C$ variate tokens through two sequential backbones:
+\begin{equation}
+  (B,L,C) \to (B,C,L) \xrightarrow{\mathrm{Linear}(L \to D)} (B,C,D).
+\end{equation}
+
+The genome of length $N$ is split in half.
+\textbf{Layers $0 \ldots N/2-1$} drive the \emph{variate backbone} (Stage 1): each LIV block mixes information across the $C$ variate tokens bidirectionally, building correlated representations.
+\textbf{Layers $N/2 \ldots N-1$} drive the \emph{temporal backbone} (Stage 2): each LIV block refines temporal structure within the $D$-dimensional variate embeddings.
+A linear head $D \to H$ per variate produces the forecast, transposed to $(B,H,C)$.
+
+The original S-Mamba \cite{wang2024smamba} is recovered by setting all Stage-1 slots to Rec-1 (Mamba) and all Stage-2 slots to GMemless (FFN).
+
+\subsubsection{iTransformer Instantiation}
+
+The iTransformer structure uses a single backbone of $N$ stacked blocks.
+Each block contains two sub-layers that alternate roles: the \emph{cross-variate} sub-layer mixes information across the $C$ variate tokens, and the \emph{per-variate} sub-layer acts independently on each variate's $D$-dimensional representation.
+
+Within a block of index $b$, genome entry $2b$ specifies the cross-variate operator and entry $2b+1$ specifies the per-variate operator (for a total genome length $2N$).
+The original iTransformer \cite{liu2024itransformer} is recovered by setting all cross-variate slots to SA-1 and all per-variate slots to GMemless.
+
+Both structures share the same input/output interface $(B,L,C) \to (B,H,C)$ and use Reversible Instance Normalisation (RevIN \cite{kim2022revin}) to remove per-variate distribution shift before the backbone and restore it after.
+
+\subsection{TiDAR-TS Adaptation}
+\label{sec:tidar_adapt}
+
+We adapt TiDAR \cite{tidar2024} to continuous-valued regression.
+The original TiDAR targets discrete language tokens with cross-entropy loss.
+Our adaptation makes three changes:
+
+\textbf{(1) MSE regression loss.}
+Both the AR and draft objectives use mean squared error on un-normalised (RevIN-restored) outputs:
+\begin{equation}
+  \mathcal{L}_{\mathrm{AR}}   = \mathrm{MSE}(\hat{x}_{2:L},\, x_{2:L}), \quad
+  \mathcal{L}_{\mathrm{Diff}} = \mathrm{MSE}(\hat{y}_{1:H},\, y_{1:H}).
+\end{equation}
+
+\textbf{(2) Deterministic draft.}
+The draft head directly predicts the forecast mean; there is no stochastic denoising or sampling step.
+Draft outputs are used as-is or overwritten by autoregressive refinement for the first $k$ positions.
+
+\textbf{(3) $\alpha$ as a training hyperparameter.}
+The balance coefficient $\alpha$ in Eq.~\eqref{eq:tidar_loss} controls how strongly the AR auxiliary task regularises the backbone.
+We treat $\alpha$ as a tunable hyperparameter and ablate values $\alpha \in \{0, 0.1, 0.5, 1.0, 2.0, 5.0\}$ in Section~\ref{sec:exp_alpha}.
+$\alpha = 0$ recovers pure parallel prediction; $\alpha \to \infty$ recovers a standard AR model with an auxiliary draft head.
+
+\subsection{NSGA-II Search Protocol}
+\label{sec:search}
+
+\subsubsection{Objectives}
+
+We define two minimisation objectives for each genome $g$:
+\begin{align}
+  f_1(g) &= \mathcal{L}_{\mathrm{val}}(g) \quad \text{(validation MSE after $N_{\mathrm{eval}}$ steps)}, \\
+  f_2(g) &= \Phi(g) \quad \text{(total parameter count)}.
+\end{align}
+No weighting is applied; NSGA-II tracks the Pareto front of accuracy versus compactness automatically.
+
+\subsubsection{Search Configuration}
+
+Table~\ref{tab:nsga_config} lists the NSGA-II hyperparameters used in all experiments.
+
+\begin{table}[t]
+\caption{NSGA-II search configuration.}
+\label{tab:nsga_config}
+\centering
+\begin{tabular}{lc}
+\toprule
+Hyperparameter & Value \\
+\midrule
+Population size           & 16 \\
+Generations               & 18 \\
+Evaluation steps / genome & 500 \\
+Mutation probability      & 0.10 \\
+Elitism (carry-over)      & 2 \\
+Crossover points          & multi-point on layer list \\
+Post-search full training & 20{,}000 steps (top-$K$ Pareto front) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each candidate genome is trained with the Adam optimiser for $N_{\mathrm{eval}} = 500$ steps on a single dataset/horizon pair; validation MSE and parameter count are recorded.
+After all 18 generations, the top-$K$ Pareto-front genomes (ranked by validation MSE) are retrained from scratch for 20{,}000 steps to obtain their final test performance.
+
+\subsubsection{Mutation and Crossover}
+
+Mutation replaces each genome entry independently with a uniformly sampled class ID from the operator pool with probability $p_{\mathrm{mut}} = 0.10$.
+Multi-point crossover selects two random cut points in the genome list and exchanges the segment between them between two parent genomes.
+A \texttt{repair} step clamps any out-of-range class IDs to the valid pool after mutation.
+
+\subsection{Overall Pipeline}
+
+The complete LIV-TS workflow proceeds in three phases:
+
+\begin{enumerate}
+  \item \textbf{Search.} Run NSGA-II for 18 generations on the target dataset (ETTh1, H\,=\,96) using $N_{\mathrm{eval}}=500$ steps per genome. Record the final Pareto front.
+  \item \textbf{Full training.} Retrain the top Pareto-front genomes for 20{,}000 steps. Report test MSE and MAE.
+  \item \textbf{Transfer.} Apply the best genome (by validation MSE) directly to new datasets and horizons without re-running evolution, to assess architectural generalisability.
+\end{enumerate}

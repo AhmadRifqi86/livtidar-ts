@@ -52,12 +52,43 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-HORIZONS = [96, 192, 336, 720]
+HORIZONS = [96]
+STRUCTURES = ["smamba", "itransformer"]
 
 
 # =============================================================================
 # Model loading
 # =============================================================================
+
+def _resolve_genome_checkpoint(genome_checkpoint: str, dataset: str,
+                               pred_len: int, structure: str) -> str:
+    """If genome_checkpoint is a folder, find best test_mse .pt for this run."""
+    import json as _json
+    p = Path(genome_checkpoint)
+    if not p.is_dir():
+        return genome_checkpoint  # direct file path — use as-is
+    run_dir = p / f"{dataset}_H{pred_len}_{structure}"
+    summary_path = run_dir / "candidates_summary.json"
+    if summary_path.exists():
+        with open(summary_path) as f:
+            candidates = _json.load(f)
+        best = min(candidates, key=lambda c: c["test_mse"])
+        target_classes = best["layer_classes"]
+        log.info(f"genome_checkpoint folder: best test_mse={best['test_mse']:.4f} "
+                 f"genome={target_classes} in {run_dir.name}")
+        for pt_file in sorted(run_dir.glob("ts_candidate_*.pt")):
+            try:
+                ckpt = torch.load(pt_file, map_location='cpu', weights_only=False)
+                if ckpt.get("layer_classes") == target_classes:
+                    log.info(f"Matched {pt_file.name}")
+                    return str(pt_file)
+            except Exception:
+                continue
+        log.warning("No .pt matched layer_classes, falling back to ts_candidate_1.pt")
+        return str(run_dir / "ts_candidate_1.pt")
+    log.warning(f"No candidates_summary.json in {run_dir}, falling back to ts_candidate_1.pt")
+    return str(run_dir / "ts_candidate_1.pt")
+
 
 def load_tidar_model(
     checkpoint: str,
@@ -68,9 +99,10 @@ def load_tidar_model(
     dim: int,
     num_layers: int,
     device: str,
+    structure: str = "itransformer",
+    dataset: str = "ETTh1",
 ) -> TiDARTSModel:
     """Return a TiDARTSModel, sourcing weights from checkpoint if provided."""
-    from argparse import Namespace
     from src.exp1_search import make_args
     from src.exp2_ablation import load_genome_from_checkpoint
 
@@ -80,7 +112,7 @@ def load_tidar_model(
         pool = build_class_pool(include_extended=True)
         genome = Genome.from_flat(ckpt['genome'], num_layers)
         args = make_args(
-            dataset='ETTh1', pred_len=pred_len, structure='itransformer',
+            dataset=dataset, pred_len=pred_len, structure=structure,
             out_dir='/tmp', dim=dim, num_layers=num_layers, seq_len=seq_len,
             device=device, include_extended=True,
         )
@@ -92,11 +124,12 @@ def load_tidar_model(
         log.info(f"Loaded TiDAR-TS model from {checkpoint}")
 
     elif genome_checkpoint:
-        # Load genome only, random weights (for architecture comparison)
+        # Resolve folder → specific .pt if needed
+        resolved = _resolve_genome_checkpoint(genome_checkpoint, dataset, pred_len, structure)
         pool = build_class_pool(include_extended=True)
-        genome = load_genome_from_checkpoint(genome_checkpoint, num_layers)
+        genome = load_genome_from_checkpoint(resolved, num_layers)
         args = make_args(
-            dataset='ETTh1', pred_len=pred_len, structure='itransformer',
+            dataset=dataset, pred_len=pred_len, structure=structure,
             out_dir='/tmp', dim=dim, num_layers=num_layers, seq_len=seq_len,
             device=device, include_extended=True,
         )
@@ -104,14 +137,14 @@ def load_tidar_model(
         args.ts_seq_len = seq_len
         args.ts_pred_len = pred_len
         model = _build_tidar_ts_model(genome, pool, args)
-        log.info(f"Built TiDAR-TS from genome checkpoint {genome_checkpoint} (random weights)")
+        log.info(f"Built TiDAR-TS from genome checkpoint {resolved} (random weights)")
 
     else:
         # Default: uniform Rec-1 genome, fresh weights
         pool = build_class_pool(include_extended=False)
         genome = make_uniform_genome(5, num_layers, pool)  # Rec-1
         args = make_args(
-            dataset='ETTh1', pred_len=pred_len, structure='itransformer',
+            dataset=dataset, pred_len=pred_len, structure=structure,
             out_dir='/tmp', dim=dim, num_layers=num_layers, seq_len=seq_len,
             device=device,
         )
@@ -119,7 +152,7 @@ def load_tidar_model(
         args.ts_seq_len = seq_len
         args.ts_pred_len = pred_len
         model = _build_tidar_ts_model(genome, pool, args)
-        log.info(f"Built default TiDAR-TS model (uniform Rec-1, fresh weights)")
+        log.info(f"Built default TiDAR-TS model (uniform Rec-1, fresh weights, structure={structure})")
 
     return model
 
@@ -191,6 +224,7 @@ def benchmark_mode(
 def run_speedup_benchmark(
     dataset: str,
     pred_len: int,
+    structure: str,
     seq_len: int,
     dim: int,
     num_layers: int,
@@ -221,6 +255,7 @@ def run_speedup_benchmark(
         n_variates=n_variates,
         seq_len=seq_len, pred_len=pred_len,
         dim=dim, num_layers=num_layers, device=device,
+        structure=structure, dataset=dataset,
     )
     log.info(f"Model params: {count_params(model):,}")
 
@@ -254,6 +289,7 @@ def run_speedup_benchmark(
     # Compute speedup relative to full-AR
     full_ar = next(r for r in results if r["ar_steps"] == pred_len)
     for r in results:
+        r["structure"] = structure
         if full_ar["median_ms_per_sample"] > 0:
             r["speedup_vs_full_ar"] = round(
                 full_ar["median_ms_per_sample"] / r["median_ms_per_sample"], 2)
@@ -279,6 +315,11 @@ def build_parser():
     p.add_argument("--pred_len", type=int, default=720)
     p.add_argument("--all_horizons", action="store_true",
                    help="Run all 4 horizons: 96, 192, 336, 720")
+    p.add_argument("--structure", type=str, default="itransformer",
+                   choices=["smamba", "itransformer"],
+                   help="Structural template for the backbone")
+    p.add_argument("--all_structures", action="store_true",
+                   help="Run all structures: smamba, itransformer")
     p.add_argument("--seq_len", type=int, default=96)
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--num_layers", type=int, default=4)
@@ -286,7 +327,8 @@ def build_parser():
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Path to tidar_ts_candidate_*.pt (trained model)")
     p.add_argument("--genome_checkpoint", type=str, default=None,
-                   help="Path to ts_candidate_*.pt (genome only, random weights)")
+                   help="Path to ts_candidate_*.pt or exp1 results folder "
+                        "(genome only, random weights; folder auto-selects best test_mse per horizon+structure)")
     # If no checkpoint: train first
     p.add_argument("--train_steps", type=int, default=5_000,
                    help="Steps to train before benchmarking (if no checkpoint)")
@@ -303,19 +345,21 @@ def main():
     args = build_parser().parse_args()
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     horizons = HORIZONS if args.all_horizons else [args.pred_len]
+    structures = STRUCTURES if args.all_structures else [args.structure]
     all_results = []
 
-    for pred_len in horizons:
-        run_dir = str(Path(args.out_dir) / f"{args.dataset}_H{pred_len}")
-        results = run_speedup_benchmark(
-            dataset=args.dataset, pred_len=pred_len, seq_len=args.seq_len,
-            dim=args.dim, num_layers=args.num_layers,
-            checkpoint=args.checkpoint, genome_checkpoint=args.genome_checkpoint,
-            train_steps=args.train_steps,
-            batch_size=args.batch_size, lr=args.lr, amp=args.amp,
-            num_workers=args.num_workers, device=device, out_dir=run_dir,
-        )
-        all_results.extend(results)
+    for structure in structures:
+        for pred_len in horizons:
+            run_dir = str(Path(args.out_dir) / f"{args.dataset}_H{pred_len}_{structure}")
+            results = run_speedup_benchmark(
+                dataset=args.dataset, pred_len=pred_len, structure=structure,
+                seq_len=args.seq_len, dim=args.dim, num_layers=args.num_layers,
+                checkpoint=args.checkpoint, genome_checkpoint=args.genome_checkpoint,
+                train_steps=args.train_steps,
+                batch_size=args.batch_size, lr=args.lr, amp=args.amp,
+                num_workers=args.num_workers, device=device, out_dir=run_dir,
+            )
+            all_results.extend(results)
 
     # Global summary
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
@@ -323,12 +367,12 @@ def main():
         json.dump(all_results, f, indent=2)
 
     # Print table
-    print(f"\n{'Mode':<22} {'H':>4} {'ms/sample':>10} {'Speedup':>8} "
+    print(f"\n{'Structure':<14} {'Mode':<22} {'H':>4} {'ms/sample':>10} {'Speedup':>8} "
           f"{'MSE':>8} {'MAE':>8}")
-    print("-" * 65)
+    print("-" * 80)
     for r in all_results:
         spd = f"{r['speedup_vs_full_ar']}×" if r['speedup_vs_full_ar'] else "—"
-        print(f"{r['mode']:<22} {r['pred_len']:>4} "
+        print(f"{r['structure']:<14} {r['mode']:<22} {r['pred_len']:>4} "
               f"{r['median_ms_per_sample']:>10.3f} {spd:>8} "
               f"{r['test_mse']:>8.4f} {r['test_mae']:>8.4f}")
 

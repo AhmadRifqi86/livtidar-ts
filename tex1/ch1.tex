@@ -2,71 +2,52 @@
 \label{sec:intro}
 
 Multivariate time series forecasting is a cornerstone task in domains ranging from energy grid management and financial trading to climate science and traffic control \cite{wu2021autoformer,zhou2021informer}.
-Accurate multi-step predictions over long horizons require models that can simultaneously capture local temporal patterns, long-range dependencies, and inter-variate correlations—three qualitatively different phenomena that may benefit from different computational inductive biases.
+Accurate multi-step predictions over long horizons require models that can simultaneously capture local temporal patterns, long-range dependencies, and inter-variate correlations: three qualitatively different phenomena that may benefit from different computational inductive biases.
 
-Recent architectures have tackled this challenge by specializing each component:
+Recent architectures have tackled this challenge by specializing each architectural component for a fixed operator family.
 iTransformer \cite{liu2024itransformer} treats each variate as a token and uses self-attention for cross-variate correlation alongside a feedforward network (FFN) for per-variate feature extraction;
 S-Mamba \cite{wang2024smamba} applies bidirectional Mamba recurrence for variate correlation followed by an FFN for temporal refinement.
 These designs encode strong prior beliefs: \emph{attention is best for cross-variate mixing} and \emph{Mamba recurrence is best for temporal modeling}.
 While each assumption yields strong results on particular benchmarks, it is unclear whether any single operator family universally excels, or whether the optimal operator varies with dataset characteristics and forecast horizon.
 
-\subsection{Motivation: Why Fixed Operator Choices May Be Suboptimal}
-
-The core tension is illustrated by comparing operator families under a controlled benchmark.
-On ETTh1 at horizon H\,=\,96 using the iTransformer structure, replacing self-attention with 3-tap gated convolution (GConv-1) reduces test MSE from 0.476 to 0.467 while using 33\% fewer parameters.
-Conversely, using Mamba SSM (Rec-1) across all slots inflates parameter count to 17M and degrades MSE to 1.213.
+The importance of this choice is illustrated by a concrete comparison.
+On ETTh1 at horizon H\,=\,96 using the iTransformer structure, replacing self-attention with a 3-tap gated convolution (GConv-1) reduces test MSE from 0.476 to 0.467 while using 33\% fewer parameters.
+Conversely, using Mamba SSM across all slots inflates parameter count to 17M and degrades MSE to 1.213.
 These results suggest that the \emph{choice of operator family per slot} is a high-impact yet underexplored design dimension.
-
 Manual search over all combinations is intractable: with eleven base operator classes, four slots per structure, and differential variants, the search space exceeds $10^{5}$ configurations per structure.
 Automated neural architecture search (NAS) \cite{elsken2019neural,zoph2017neural} offers a principled alternative, but existing NAS methods for time series focus on hyperparameter tuning rather than operator-family selection.
 
-\subsection{Our Approach: LIV-TS}
-
-We propose \textbf{LIV-TS}, which addresses the operator-selection problem through two components:
-
-\textbf{1. Linear Input-Varying (LIV) unification.}
-Following the LIV framework \cite{thomas2024star,massaroli2024liv}, we express all mixing operators—self-attention variants, state-space models, gated convolutions, and feedforward networks—as instances of a token-mixing matrix $T_{ij}(x)$ whose structural pattern determines the operator family:
+To address this gap, we propose \textbf{LIV-TS}, a framework built on two components.
+First, following the Linear Input-Varying (LIV) framework \cite{thomas2024star,massaroli2024liv}, we express all mixing operators (self-attention variants, state-space models, gated convolutions, and feedforward networks) as instances of a token-mixing matrix $T_{ij}(x)$ whose structural pattern determines the operator family:
 \begin{itemize}
-  \item \emph{LOW\_RANK}: $T = CB^\top / \sqrt{d}$ — recovers multi-head self-attention (SA-1 through SA-4);
-  \item \emph{SEMI\_SEPARABLE}: $T_{ij} = C_i\!\prod_{k=j}^{i-1}\!A_k\,B_j$ — recovers SSMs including Mamba (Rec-1/2) and discretized S4 (Rec-3), and Closed-form Continuous-time networks / CfC (Rec-4);
-  \item \emph{TOEPLITZ}: $T_{ij} = C_i K_{i-j} B_j$ — recovers local (GConv-1) and long-range input-dependent convolutions (GConv-2);
-  \item \emph{DIAGONAL}: $T_{ij} = C_i B_i \delta_{ij}$ — recovers element-wise gating (SwiGLU FFN).
+  \item \emph{LOW\_RANK}: $T = CB^\top / \sqrt{d}$, which recovers multi-head self-attention (SA-1 through SA-4);
+  \item \emph{SEMI\_SEPARABLE}: $T_{ij} = C_i\!\prod_{k=j}^{i-1}\!A_k\,B_j$, which recovers SSMs including Mamba and Closed-form Continuous-time networks (CfC);
+  \item \emph{TOEPLITZ}: $T_{ij} = C_i K_{i-j} B_j$, which recovers local and long-range input-dependent convolutions;
+  \item \emph{DIAGONAL}: $T_{ij} = C_i B_i \delta_{ij}$, which recovers element-wise gating (SwiGLU FFN).
 \end{itemize}
 This unification lets us treat all operators as interchangeable genome entries.
-
-\textbf{2. NSGA-II evolutionary search.}
-We encode each forecasting architecture as a genome of LIV class identifiers—one per operator slot—and run NSGA-II \cite{deb2002nsga2} to simultaneously minimize validation MSE and parameter count.
-The Pareto frontier balances accuracy against model compactness without requiring explicit weighting.
-
-Beyond architecture search, we integrate the Think-in-Diffusion Autoregressive (TiDAR) training scheme \cite{tidar2024} into LIV-TS, enabling parallel draft prediction of all $H$ future steps in a single forward pass with optional autoregressive refinement steps.
-This decoupling of \emph{quality} (full AR) from \emph{speed} (parallel draft) is particularly valuable for long-horizon settings (H\,=\,720) where autoregressive decoding is prohibitively slow.
-
-\subsection{Contributions}
+Second, we encode each forecasting architecture as a genome of LIV class identifiers (one per operator slot) and run NSGA-II \cite{deb2002nsga2} to simultaneously minimize validation MSE and parameter count, with the Pareto frontier balancing accuracy against model compactness without requiring explicit weighting.
+Additionally, we integrate the Think-in-Diffusion Autoregressive (TiDAR) training scheme \cite{tidar2024} into LIV-TS, enabling parallel draft prediction of all $H$ future steps in a single forward pass with optional autoregressive refinement, which is particularly valuable for long-horizon settings where sequential decoding is prohibitively slow.
 
 The main contributions of this work are:
-
 \begin{enumerate}
   \item \textbf{LIV-TS framework.}
-    We formalize time series forecasting architecture search within the LIV operator algebra, providing a clean genome encoding compatible with two structural templates: S-Mamba-style and iTransformer-style.
+    We formalize time series forecasting architecture search within the LIV operator algebra, providing a clean genome encoding compatible with two structural templates (S-Mamba-style and iTransformer-style) and an operator pool that spans attention, convolution, SSM, and Closed-form Continuous-time (CfC) \cite{hasani2022liquid} recurrence classes.
 
   \item \textbf{Multi-objective evolutionary search.}
-    We demonstrate that NSGA-II discovers heterogeneous operator mixtures—combining convolution, attention, and SSM variants within a single model—that dominate any single-class baseline on the Pareto frontier of accuracy versus parameter count.
-    On ETTh1 H\,=\,96, the best evolved S-Mamba genome achieves test MSE\,=\,0.596 with only 528K parameters, compared to 17M parameters for the all-SSM baseline (MSE\,=\,0.999).
+    We demonstrate that NSGA-II discovers heterogeneous operator mixtures (combining convolution, attention, and SSM variants within a single model) that dominate any single-class baseline on the Pareto frontier of accuracy versus parameter count.
 
   \item \textbf{TiDAR adaptation for continuous time series.}
-    We adapt TiDAR's joint autoregressive–diffusion loss to continuous-valued forecasting and show that the draft mode achieves an 80.8$\times$ wall-clock speedup over full autoregressive decoding with test MSE degradation of only 0.004 absolute.
+    We adapt TiDAR's joint autoregressive--diffusion loss to continuous-valued forecasting and show that the draft mode achieves an 80.8$\times$ wall-clock speedup over full autoregressive decoding with negligible accuracy loss.
 
   \item \textbf{Cross-dataset architecture transfer.}
-    We show that genomes discovered by evolutionary search on ETTh1 transfer non-trivially to ETTh2 and Exchange-Rate, outperforming the all-SSM baseline by 32\%–63\% in test MSE without retraining the genome, providing evidence that evolutionary search recovers structurally meaningful inductive biases.
-
-  \item \textbf{CfC operator for time series.}
-    We introduce the Closed-form Continuous-time (CfC) recurrence \cite{hasani2022liquid} as an LIV operator class (Rec-4) and show it achieves comparable accuracy to Mamba (Rec-1) on ETTh1 while offering a complementary gating mechanism suited to non-stationary continuous dynamics.
+    We show that genomes discovered on ETTh1 transfer to ETTh2 and Exchange-Rate, outperforming the all-SSM baseline by up to 63\% in test MSE without retraining, providing evidence that evolutionary search recovers structurally meaningful inductive biases.
 \end{enumerate}
 
-\subsection{Paper Organization}
-
-Section~\ref{sec:background} reviews the LIV operator algebra, existing forecasting structures, and the NSGA-II algorithm.
-Section~\ref{sec:method} describes the LIV-TS genome encoding, structural templates, fitness evaluation, and TiDAR integration.
+The remainder of this paper is organized as follows.
+Section~\ref{sec:background} reviews existing time series forecasting architectures and related work on NAS and unified sequence operators.
+Section~\ref{sec:prelim} introduces the technical foundations: the LIV operator algebra, CfC networks, NSGA-II, and TiDAR.
+Section~\ref{sec:method} describes the LIV-TS genome encoding, structural templates, fitness evaluation, and TiDAR adaptation.
 Section~\ref{sec:experiments} presents experiments on operator ablation, full architecture search, TiDAR speedup, and cross-dataset transfer.
 Section~\ref{sec:discussion} analyzes when heterogeneous architectures outperform single-operator models and characterizes the discovered Pareto fronts.
 Section~\ref{sec:conclusion} concludes and outlines future directions.

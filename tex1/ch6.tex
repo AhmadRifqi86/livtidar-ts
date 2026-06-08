@@ -1,1 +1,94 @@
-% placeholder
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{When Does Operator Heterogeneity Help?}
+
+The ablation results in Section~\ref{sec:exp_ablation} show that the benefit of operator heterogeneity is dataset- and horizon-dependent rather than universally guaranteed.
+On ETTh1, the NSGA-II heterogeneous genome (MIXED\_GA) consistently occupies the Pareto front: it achieves lower MSE than ALL\_CONV and ALL\_ATTN at less than half the parameter budget of ALL\_FFN, while avoiding the 16.9M-parameter cost of ALL\_CFC.
+On Exchange-Rate, however, ALL\_FFN achieves the best absolute MSE (0.099 for iTransformer, H\,=\,96), an outlier driven by the smoothness and low variate count (8 variables) of the currency dataset, where the position-wise gate of GMemless suffices as a near-optimal operator.
+
+These observations suggest a dataset-complexity gradient: on high-variate, non-stationary datasets (ETTh1, ETTm1), cross-token interaction is essential and heterogeneous mixtures of attention and convolution operators outperform homogeneous designs.
+On low-variate, trend-dominated datasets (Exchange-Rate), a simple element-wise gating mechanism can match or exceed more expressive operators at shorter horizons.
+This pattern aligns with the ``no free lunch'' principle applied to architectural inductive biases: the best operator is determined by the structural properties of the target signal rather than by any inherent superiority of one mixing family.
+
+The failure of ALL\_CONV on Exchange-Rate is particularly informative.
+The TOEPLITZ T matrix imposes a locality prior (3-tap or 64-tap window), which is well-suited to ETTh1's locally correlated temperature dynamics but mismatched to the global regime shifts and trend reversals characteristic of currency rates.
+This confirms that operator selection interacts with signal non-stationarity in ways that manual design heuristics are unlikely to anticipate.
+
+\subsection{Pareto Front Characteristics}
+
+A consistent finding across all three datasets is that the Pareto front is populated exclusively by \emph{heterogeneous} genomes: no single-class configuration appears on the final NSGA-II Pareto front in any (dataset, horizon, structure) condition.
+The evolutionary search consistently discovers that different slots within the same model benefit from different inductive biases.
+
+For the S-Mamba structure, the Stage-1 (variate backbone) and Stage-2 (temporal backbone) slots often converge to complementary operator families: attention variants (LOW\_RANK) for variate mixing and convolution or FFN operators for temporal refinement.
+This mirrors the design rationale of the original S-Mamba architecture, but the NSGA-II search further refines \emph{which} attention variant is appropriate (MQA, GQA, or full MHA) and whether the temporal backbone benefits from a convolutional or position-wise operator.
+
+For the iTransformer structure, the alternating cross-variate and per-variate slots frequently diverge: the cross-variate slot gravitates toward attention-family operators (necessary for global variate correlation) while the per-variate slot prefers GConv-2 or GMemless (sufficient for local temporal structure).
+The best ETTh1 iTransformer genome combines GConv-2 (long input-dependent convolution) for per-variate slots with differential-FFN for cross-variate slots, reversing the original iTransformer design (attention for cross-variate, FFN for per-variate) in a way that would not have been discovered by manual ablation.
+
+The Pareto parameter counts are also notably compact: the best ETTh1 genomes occupy the 500K--2M parameter range, versus 3.2M for ALL\_FFN and 16.9M for ALL\_CFC.
+This compactness arises because NSGA-II's dual-objective pressure actively penalises parameter inflation: a genome that sacrifices accuracy for compactness survives if no competitor dominates on both objectives simultaneously.
+
+\subsection{The TiDAR Draft-Mode Paradox}
+
+The most counterintuitive result in Section~\ref{sec:tidar_speedup} is that the full-AR mode (k=96) yields \emph{higher} MSE (0.241) than draft or partial-AR modes (0.169) on Exchange-Rate.
+This inversion is not a fluke: a comparable pattern appears on ETTh1, where full-AR MSE (0.776) exceeds draft MSE (0.640) by 0.136 absolute.
+
+The explanation lies in the TiDAR training objective (Eq.~\eqref{eq:tidar_loss}).
+The dominant loss term $\mathcal{L}_{\mathrm{Diff}}$ trains the model's forecast head to predict \emph{all $H$ positions simultaneously} from the bidirectionally-masked lookback.
+The AR auxiliary loss $\mathcal{L}_{\mathrm{AR}}$ trains the backbone to reconstruct next-step lookback tokens, providing temporal structure regularisation.
+At inference time, however, full-AR mode sequentially feeds predicted outputs back as inputs for subsequent steps.
+The model was not trained to condition its forecast on its own potentially noisy predictions; it was trained to condition on ground-truth lookback tokens.
+The result is a \emph{distribution shift} between training (clean lookback) and full-AR inference (predicted lookback), which compounds errors over 96 steps.
+
+Draft mode avoids this mismatch entirely: all 96 positions are predicted in one pass from clean lookback tokens, exactly matching the training distribution.
+This confirms that TiDAR's architectural value is not just speed but also \emph{training-inference consistency}: the parallel draft is both faster and more accurate than the sequential alternative for this training objective.
+
+The partial-AR modes ($k \in \{1, 4, 16\}$) partially recover full-AR quality for long-horizon refinement (e.g., $k=16$ at 5.7$\times$ speedup) without incurring the full compounding error.
+In practice, the $k=1$ mode (48.5$\times$ speedup, MSE\,=\,0.169) provides the best trade-off: marginal quality improvement over pure draft at half the latency cost of $k=4$.
+
+\subsection{Cross-Dataset Transfer: Structural Bias Portability}
+
+The transfer experiments in Section~\ref{sec:generalization} reveal an asymmetric portability of structural inductive biases across dataset families.
+
+\textbf{ETTh1 $\to$ ETTh2 / Exchange (successful).}
+Both transfers achieve substantial gains over the all-Mamba baseline (31\%--63\% at H\,=\,96--336).
+ETTh1 and ETTh2 share the same physical measurement process (electricity transformer temperature at different substations), so operator preferences discovered on one transfer directly to the other.
+The ETTh1$\to$Exchange transfer is more surprising: hourly electricity temperature and daily currency exchange rates are superficially different, yet both exhibit smooth autocorrelated dynamics with moderate inter-variate correlations.
+The attention-dominant genome discovered on ETTh1 appears to capture a general ``smooth multivariate trend'' inductive bias that applies equally well to Exchange-Rate.
+
+\textbf{ETTh1 $\to$ ETTm (mixed).}
+ETTm1 and ETTm2 share the same physical sensors as ETTh1 but at 15-minute resolution (4$\times$ finer).
+The transferred genome underperforms the all-Mamba baseline at short horizons (H\,=\,96, $-$9\% on ETTm1) but recovers at long horizons (H\,=\,720, $+$37\% on ETTm2).
+We interpret this as a resolution mismatch: the ETTh1 genome was selected for 96-step hourly prediction (equivalent to 4 days ahead), while ETTm at H\,=\,96 covers only 24 hours, a qualitatively shorter-range task where the all-Mamba baseline's stronger sequential prior is advantageous.
+At H\,=\,720, the longer horizon reduces this resolution effect and the attention-dominant structure recovers its advantage.
+
+\textbf{Exchange $\to$ ETT (unsuccessful).}
+The Exchange genome transfers poorly across all four ETT targets ($-$0.3\% to $-$32.8\%).
+The Exchange-Rate genome was selected under pressure from a low-variate, globally smooth, trend-dominated signal.
+The discovered operator mix (likely FFN-dominant based on the ablation results) provides no cross-token mixing benefit on the higher-variate, locally complex ETT dynamics.
+This one-directional failure confirms that the portability of a discovered genome is bounded by the structural complexity of the source dataset: genomes trained on simpler datasets underfit richer target tasks.
+
+\subsection{Limitations}
+
+\textbf{Search budget.}
+Each NSGA-II run uses 500-step evaluations over 18 generations (population 16), totalling approximately 16$\times$18 = 288 model evaluations per (dataset, horizon) pair.
+This is inexpensive relative to full neural architecture search but may miss high-quality genomes in low-density Pareto regions.
+Increasing the search budget or using Bayesian optimisation as a surrogate could yield better Pareto fronts at the cost of longer search time.
+
+\textbf{Single-horizon genome per experiment.}
+Each genome is optimised for a specific horizon $H$.
+The cross-dataset transfer experiments suggest that horizon-specific biases are significant (Section~5.4 above), so a genome that excels at H\,=\,96 may not be the best choice at H\,=\,720.
+A multi-horizon joint search is a natural extension.
+
+\textbf{Benchmark scope.}
+We evaluate on three benchmarks; a broader evaluation covering more datasets (e.g., Weather, Traffic, PEMS) would strengthen the generality claims.
+Exchange-Rate's low variate count and short length also make it atypical; the observed ALL\_FFN dominance may not hold for higher-variate financial datasets.
+
+\textbf{CfC parameter cost.}
+The 16$\times$ internal expansion of the CfC featurizer makes ALL\_CFC (16.9M parameters) an outlier that the Pareto pressure of NSGA-II consistently avoids.
+A compact CfC variant with smaller internal dimension could allow the SEMI\_SEPARABLE operator to appear more frequently in discovered genomes, potentially improving long-horizon performance where sequential structure is most beneficial.
+
+\textbf{TiDAR $\alpha$ sensitivity.}
+The horizon-dependent optimal $\alpha$ (Section~\ref{sec:exp_alpha}) implies that a fixed $\alpha$ will be suboptimal across all horizons.
+An adaptive $\alpha$ schedule that increases AR weight with forecast horizon could automate this trade-off.

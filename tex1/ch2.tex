@@ -1,4 +1,4 @@
-\section{Background and Related Work}
+\section{Related Work}
 \label{sec:background}
 
 \subsection{Time Series Forecasting Architectures}
@@ -7,7 +7,7 @@ Multivariate long-sequence forecasting has evolved through several architectural
 Early Transformer-based models such as Informer \cite{zhou2021informer} and Autoformer \cite{wu2021autoformer} apply attention over the \emph{temporal} axis, treating each time-step as a token.
 This yields $\mathcal{O}(L^2)$ complexity and conflates temporal modelling with cross-variate modelling, since each token mixes all $C$ variates at a single time-step.
 
-A decisive shift came with the observation that \emph{inverting} the token definition---making each variate a token---decouples variate correlation from temporal structure and reduces attention cost to $\mathcal{O}(C^2)$ when $C \ll L$.
+A decisive shift came with the observation that \emph{inverting} the token definition (making each variate a token) decouples variate correlation from temporal structure and reduces attention cost to $\mathcal{O}(C^2)$ when $C \ll L$.
 iTransformer \cite{liu2024itransformer} operationalises this by embedding each variate's full $L$-step history into a single $D$-dimensional token, applying self-attention across the $C$ variate tokens for cross-variate mixing, and a per-variate FFN for feature transformation.
 S-Mamba \cite{wang2024smamba} adopts the same variate-token layout but replaces the single backbone with a two-stage pipeline: a bidirectional Mamba block for variate correlation followed by an FFN block for temporal refinement.
 DLinear \cite{zeng2023dlinear} challenges the necessity of complex operators entirely, showing that a simple decomposition plus linear projection is surprisingly competitive, motivating investigation into whether operator complexity should be matched to each task.
@@ -16,165 +16,19 @@ PatchTST \cite{nie2023patchtst} and TimesNet \cite{wu2023timesnet} explore patch
 Across these models a common pattern emerges: each design \emph{commits} to a specific operator for each architectural slot without empirical justification for that choice.
 This motivates an operator-agnostic search over a unified operator family.
 
-\subsection{Linear Input-Varying (LIV) Operators}
+\subsection{Neural Architecture Search for Time Series}
 
-The LIV framework \cite{thomas2024star,massaroli2024liv} provides a unified algebraic view of sequence mixing operators.
-Its central insight is to replace the \emph{fixed} weight matrix of a standard linear layer with a weight that is \emph{assembled from the input itself}.
-
-In a standard linear layer the output is $Y = Wx$, where $W$ is a learned parameter independent of $x$.
-In a LIV block, four learned linear projections of $x$ first produce feature vectors $B$, $C$, $S$, $V$:
-\begin{equation}
-  B = W_B x, \quad C = W_C x, \quad S = f_S(x), \quad V = W_V x,
-  \label{eq:featurizer}
-\end{equation}
-where $W_B, W_C, W_V$ are plain \texttt{nn.Linear} layers (single matrix multiplies) and $f_S$ is either a linear layer with a learned bias or, for the input-dependent convolution case, a small two-layer MLP.
-These are called the \emph{featurizer}.
-
-The $L \times L$ token-mixing matrix $T$ is then \emph{assembled algebraically} from $B$, $C$, and $S$ — the four projections have distinct roles:
-
-\begin{itemize}
-  \item $\mathbf{b}_j$ and $\mathbf{c}_i$ (rows of $B$ and $C$) \textbf{dot-product to produce the scalar gate strength} of each entry $T_{ij}$.
-        Their inner product $\langle\mathbf{c}_i, \mathbf{b}_j\rangle$ measures how strongly position $i$ should attend to position $j$.
-  \item $S$ \textbf{provides the structural scalar} $M_{ij}$ that further modulates the gate strength: it encodes the \emph{pattern} (a decay factor for SSMs, a kernel value for convolutions, the constant 1 for attention, or absent for the diagonal case).
-  \item $V$ \textbf{carries the payload}: it never enters the construction of $T$ at all.
-        Once $T$ is assembled, the token-mixed output is obtained by $T \cdot V$, which routes the actual feature content.
-\end{itemize}
-
-Concretely, each entry of $T$ is:
-\begin{equation}
-  T_{ij} = \underbrace{\langle\mathbf{c}_i,\, \mathbf{s}_{ij} \odot \mathbf{b}_j\rangle}_{\text{gate strength modulated by structure}},
-  \label{eq:tij}
-\end{equation}
-where $\mathbf{s}_{ij} \in \mathbb{R}^d$ is the \emph{structural modulator} derived from $S$ — for LOW\_RANK it is the all-ones vector; for SEMI\_SEPARABLE it is the element-wise cumulative product $\prod_{k=j}^{i-1}\mathbf{a}_k$ of transition vectors from $S$; for TOEPLITZ it is a scalar $K_{i-j}$ broadcast from $S$.
-
-The full LIV forward pass is:
-\begin{align}
-  \mathrm{mixed}_i &= \sum_j T_{ij} \cdot \mathbf{v}_j, \quad \mathbf{v}_j = \text{$j$-th row of } V,
-  \label{eq:token_mix} \\
-  Y_i &= W \cdot \mathrm{mixed}_i,
-  \label{eq:channel_mix}
-\end{align}
-where $W$ is a \emph{static} \texttt{nn.Parameter} — a fixed learned matrix independent of $x$.
-The net computation is: (1) project $x$ to $B, C, S, V$ via linear layers; (2) assemble $T$ from $B, C, S$ algebraically; (3) mix content with $\mathrm{mixed} = T \cdot V$; (4) project with fixed $W$.
-
-\subsubsection{Token Mixing Families}
-
-Four choices of how $S$ constructs $\mathbf{s}_{ij}$ span the space of practical sequence operators.
-
-\textbf{LOW\_RANK} — $\mathbf{s}_{ij} = \mathbf{1}/\sqrt{d}$ (constant, S unused):
-\begin{equation}
-  T_{ij} = \langle\mathbf{c}_i,\, \mathbf{b}_j\rangle / \sqrt{d}, \qquad T = CB^\top / \sqrt{d}.
-\end{equation}
-Every pair $(i,j)$ interacts with equal structural weight; row-wise softmax recovers multi-head attention \cite{vaswani2017attention}.
-Cost $\mathcal{O}(L^2 d)$; full bidirectional context.
-
-\textbf{SEMI\_SEPARABLE} — $\mathbf{s}_{ij} = \prod_{k=j}^{i-1}\mathbf{a}_k$ (S gives forget gate $\mathbf{a}_k$ per step):
-\begin{equation}
-  T_{ij} = \left\langle\mathbf{c}_i,\; \left(\prod_{k=j}^{i-1}\mathbf{a}_k\right) \odot \mathbf{b}_j\right\rangle \;\; (j \le i), \quad T_{ij} = 0 \;\; (j > i),
-\end{equation}
-where $\mathbf{a}_k \in (0,1)^d$ is the per-step forget gate (the $k$-th row of $S$), and $\mathbf{b}_j$ is the input contribution at position $j$.
-The structural product $\prod_{k=j}^{i-1}\mathbf{a}_k$ decays the contribution of position $j$ exponentially as it propagates forward to position $i$; it is computed once via \texttt{torch.cumprod} and shared across all pairs without any per-element network call.
-In this work we use CfC \cite{hasani2021cfc} as the sole SEMI\_SEPARABLE operator; its complementary gating specialises the featurizer as described in Section~\ref{sec:cfc_liv} below.
-
-\textbf{TOEPLITZ} — $\mathbf{s}_{ij} = K_{i-j}\,\mathbf{1}$ (S provides scalar kernel, zero beyond window):
-\begin{equation}
-  T_{ij} = \langle\mathbf{c}_i,\, \mathbf{b}_j\rangle \cdot K_{i-j}, \quad K_{i-j} = 0 \;\text{if}\; |i-j| \ge k.
-\end{equation}
-$S$ is averaged across the feature dimension to yield a scalar kernel vector $K \in \mathbb{R}^k$ indexed by offset.
-For a fixed kernel $K$ is an \texttt{nn.Parameter}; for the input-dependent variant, a two-layer MLP maps the global average of $x$ to $K$ — this is the only operator where $f_S(x)$ involves a nonlinear network \cite{poli2023hyena}.
-Cost $\mathcal{O}(Lkd)$ for window size $k$.
-
-\textbf{DIAGONAL} — $\mathbf{s}_{ij} = \mathbf{1}$ only when $i=j$, else zero (S unused):
-\begin{equation}
-  T_{ij} = \langle\mathbf{c}_i,\, \mathbf{b}_i\rangle\,\delta_{ij}, \qquad \mathrm{mixed}_i = \langle\mathbf{c}_i,\, \mathbf{b}_i\rangle\;\mathbf{v}_i.
-\end{equation}
-Only the diagonal of $T$ is non-zero; the scalar $\langle\mathbf{c}_i, \mathbf{b}_i\rangle$ gates how strongly position $i$'s value $\mathbf{v}_i$ passes through.
-With $\mathbf{c}_i = \mathbf{1}$ and $\mathbf{b}_i = \mathrm{SiLU}(W_{\mathrm{gate}}\,x_i)$, this recovers the SwiGLU FFN \cite{shazeer2020glu} at $\mathcal{O}(Ld)$ cost with no cross-token interaction.
-
-The four families trade off context range against cost:
-\vspace{2pt}
-\begin{center}
-\small DIAGONAL $<$ TOEPLITZ $<$ SEMI\_SEPARABLE $\approx$ LOW\_RANK \quad (in context width)
-\end{center}
-\vspace{2pt}
-while SEMI\_SEPARABLE and DIAGONAL share $\mathcal{O}(Ld)$ recurrent complexity versus $\mathcal{O}(L^2d)$ for LOW\_RANK.
-
-\subsection{Recurrent Sequence Models}
-
-Structured State-Space models (S4 \cite{gu2021s4}) and Mamba \cite{gu2023mamba} parameterise causal recurrences where a hidden state $h_t$ summarises all past inputs.
-Both belong to the SEMI\_SEPARABLE family in the LIV taxonomy: $S$ supplies the per-step transition scalar $A_k$ and the T matrix unrolls the recurrence as a lower-triangular matrix of decayed contributions.
-They are included here as the direct conceptual predecessors of CfC, which is the SEMI\_SEPARABLE operator used in this work.
-
-\subsection{CfC-LNN and its LIV Representation}
-\label{sec:cfc_liv}
-
-CfC (Closed-form Continuous-time) networks \cite{hasani2021cfc}, derived from Liquid Time-Constant neurons \cite{hasani2022liquid}, solve continuous-time recurrent dynamics in closed form.
-The standard CfC state update is:
-\begin{equation}
-  h_t = g_t \odot h_{t-1} + (1 - g_t) \odot \tilde{h}_t,
-  \quad g_t = \sigma(W_g\,x_t + b_g),
-  \label{eq:cfc_recurrence}
-\end{equation}
-where $g_t \in (0,1)^d$ is the \emph{forget gate} and $(1-g_t)$ is the \emph{input gate}, with the complementary constraint $g_t + (1-g_t) = 1$ enforcing a convex interpolation between the retained state and the new input $\tilde{h}_t = \tanh(W_{\mathrm{in}}\,x_t)$.
-
-\subsubsection{CfC as a SEMI\_SEPARABLE LIV Block}
-
-Unrolling Eq.~\eqref{eq:cfc_recurrence} from position $j$ to position $i$ shows that $h_i$ is a weighted sum of all past inputs:
-\begin{equation}
-  h_i = \sum_{j=0}^{i} \underbrace{\left(\prod_{k=j+1}^{i} g_k\right)}_{\text{survival from }j\text{ to }i} \odot \underbrace{(1-g_j) \odot \tilde{h}_j}_{\text{input absorbed at }j}.
-  \label{eq:cfc_unrolled}
-\end{equation}
-This is exactly the SEMI\_SEPARABLE token mixing.
-The LIV featurizer for CfC maps each input token to:
-\begin{equation}
-  \mathbf{b}_j = (1-g_j) \odot W_{\mathrm{in}}\,x_j, \quad
-  \mathbf{a}_k = g_k = \sigma(W_g\,x_k), \quad
-  \mathbf{c}_i = W_C\,x_i, \quad
-  \mathbf{v}_j = W_V\,x_j,
-  \label{eq:cfc_featurizer}
-\end{equation}
-so each entry of $T(x)$ becomes:
-\begin{equation}
-  T_{ij} = \left\langle W_C\,x_i,\;\; \left(\prod_{k=j}^{i-1} \sigma(W_g\,x_k)\right) \odot (1-\sigma(W_g\,x_j)) \odot W_{\mathrm{in}}\,x_j \right\rangle.
-  \label{eq:cfc_tij}
-\end{equation}
-The scalar $T_{ij}$ thus encodes: \emph{how much of position $j$'s contribution}, modulated by its own input gate $(1-g_j)$, \emph{survives} through the chain of forget gates $g_{j}\!\cdot\ldots\cdot g_{i-1}$, \emph{as read out} by position $i$'s output projection $\mathbf{c}_i$.
-The token-mixed output $\mathrm{mixed}_i = \sum_{j \le i} T_{ij}\,\mathbf{v}_j$ is a weighted sum of value vectors, where the weight of each past position decays with the cumulative product of all intermediate forget gates — recovering precisely the CfC hidden state $h_i$ in Eq.~\eqref{eq:cfc_unrolled}.
-
-The complementary constraint $g_t + (1-g_t) = 1$ ensures that each gate pair $(A_k, B_k)$ partitions unity, stabilising gradient flow through the cumulative product and making CfC particularly well-suited to smooth continuous-valued signals such as exchange rates and temperature series.
-
-\subsection{NSGA-II}
-
-NSGA-II \cite{deb2002nsga2} is a fast elitist evolutionary algorithm for multi-objective optimisation.
-It maintains a population ranked by Pareto dominance: an individual $a$ dominates $b$ if $a$ is no worse than $b$ on all objectives and strictly better on at least one.
-Rank-0 individuals form the Pareto front.
-Within each rank, crowding distance prioritises individuals in sparse objective-space regions, preserving diversity.
-Parents are selected by tournament on (rank, crowding distance); offspring are produced by multi-point crossover and per-gene mutation.
-Elitism preserves the top individuals across generations, guaranteeing monotone improvement of the Pareto front.
-
-\subsection{TiDAR: Think-in-Diffusion Autoregressive Prediction}
-
-Standard autoregressive (AR) forecasting generates the horizon sequentially at $\mathcal{O}(H)$ forward passes.
-TiDAR \cite{tidar2024} proposes a hybrid training objective that enables parallel \emph{draft} prediction of all $H$ steps in a single pass, with optional AR refinement.
-
-The $L+H$ tokens are processed jointly under a hybrid sparsity mask: lookback tokens attend causally among themselves; forecast positions are masked but attend bidirectionally to the full lookback.
-The training loss combines a next-step AR objective on the lookback with a parallel prediction objective on the masked horizon:
-\begin{equation}
-  \mathcal{L}_{\mathrm{TiDAR}} = \frac{1}{1+\alpha}\bigl(\alpha \cdot \mathcal{L}_{\mathrm{AR}} + \mathcal{L}_{\mathrm{Diff}}\bigr).
-  \label{eq:tidar_loss}
-\end{equation}
-At inference, three operating modes trade quality against speed: pure draft ($\mathcal{O}(1)$), partial-AR ($\mathcal{O}(k)$), and full-AR ($\mathcal{O}(H)$).
-
-\subsection{Related Work}
-
-\textbf{NAS for time series.}
 Existing automated search for time series focuses on hyperparameter optimisation (learning rate, hidden size, patch length) rather than operator-family selection \cite{elsken2019neural}.
 Cell-based NAS \cite{zoph2017neural} has been applied to RNN design but not to the modern SSM/attention/convolution pool.
+To our knowledge, LIV-TS is the first work to frame operator-family selection as a multi-objective evolutionary search problem within a unified sequence-mixing algebra.
 
-\textbf{Unified sequence operators.}
+\subsection{Unified Sequence Operators}
+
 Mamba \cite{gu2023mamba} reframes SSMs as selective state spaces; Hyena \cite{poli2023hyena} generalises convolution to long implicit kernels.
 The LIV formalism \cite{thomas2024star,massaroli2024liv} subsumes these under a single token-mixing abstraction, making it a natural grammar for operator search.
 
-\textbf{Parallel sequence decoding.}
+\subsection{Parallel Sequence Decoding}
+
+Standard autoregressive decoding is sequential and costly at long horizons.
 Non-autoregressive Transformers \cite{gu2018nonautoregressive} and diffusion language models demonstrate that parallel generation is viable in discrete settings.
-TiDAR \cite{tidar2024} extends this to a hybrid draft-then-refine framework suitable for continuous signals.
+TiDAR \cite{tidar2024} extends this to a hybrid draft-then-refine framework; we adapt it to continuous-valued time series regression in Section~\ref{sec:tidar_adapt}.

@@ -13,6 +13,10 @@
 \usepackage{cite}
 \usepackage{url}
 \usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,decorations.pathreplacing}
 
 \hyphenation{op-tical net-works semi-conduc-tor}
 
@@ -29,17 +33,14 @@
 
 % ==================== ABSTRACT ====================
 \begin{abstract}
-Contemporary state-of-the-art time series forecasting models—including DMamba, S-Mamba, and iTransformer—achieve strong performance but hardcode specific operator choices (Mamba recurrence, self-attention, or feedforward networks) for each architectural component.
+Contemporary state-of-the-art time series forecasting models, including S-Mamba \cite{wang2024smamba} and iTransformer \cite{liu2024itransformer}, achieve strong performance but hardcode specific operator choices (Mamba recurrence, self-attention, or feedforward networks) for each architectural component.
 This rigid assignment assumes a universal inductive bias that may not hold across diverse datasets and forecasting horizons.
-We propose \textbf{LIV-TS}, a framework that casts time series forecasting architecture design as a multi-objective evolutionary search over \emph{Linear Input-Varying} (LIV) operators.
+We propose \textbf{LIV-TS}, a framework that casts time series forecasting architecture design as a multi-objective evolutionary search over \emph{Linear Input-Varying} (LIV) \cite{massaroli2024liv} operators.
 LIV provides a unified parameterization of attention, state-space models (SSMs), gated convolutions, and feedforward networks under a single token-mixing matrix whose structure determines the operator family.
-We instantiate LIV operators inside two established forecasting structures—S-Mamba and iTransformer—and apply NSGA-II to jointly optimize forecasting accuracy and model compactness.
-Additionally, we adapt the Think-in-Diffusion Autoregressive (TiDAR) training scheme for continuous-valued time series, enabling parallel draft prediction with optional autoregressive refinement.
-Experiments on the ETT benchmark and Exchange-Rate dataset reveal that evolutionary search consistently discovers \emph{heterogeneous} operator mixtures that outperform any single fixed operator class.
-The NSGA-II best candidate for S-Mamba on ETTh1 (H=96) achieves a test MSE of \textbf{0.596}, with only 528K parameters—a 32$\times$ reduction over the all-SSM baseline (17M parameters) without sacrificing accuracy.
-The TiDAR draft mode delivers an \textbf{80.8$\times$} inference speedup over full autoregressive decoding with negligible accuracy loss.
-Cross-dataset architecture transfer experiments show that genomes discovered on ETTh1 generalize to ETTh2 and Exchange-Rate, reducing MSE by up to 63\% relative to the all-SSM baseline.
-Our results demonstrate that operator choice is a critical yet underexplored axis of model design in time series forecasting, and that evolutionary search over a unified LIV operator pool reliably identifies compact, high-quality architectures.
+We instantiate LIV operators inside two established forecasting structures (S-Mamba and iTransformer) and apply NSGA-II \cite{deb2002nsga2} to jointly optimize forecasting accuracy and model compactness.
+Additionally, we adapt the Think-in-Diffusion Autoregressive (TiDAR) \cite{tidar2024} training scheme for continuous-valued time series, enabling parallel draft prediction with optional autoregressive refinement.
+Experiments on the ETT benchmark and Exchange-Rate dataset reveal that evolutionary search consistently discovers \emph{heterogeneous} operator mixtures that outperform any single fixed operator class, achieving a 32$\times$ parameter reduction over the all-SSM baseline without sacrificing accuracy.
+Our results demonstrate that operator choice is a critical yet underexplored axis of model design in time series forecasting, and that evolutionary search over a unified LIV operator pool reliably identifies compact, high-quality architectures that transfer across datasets and support fast parallel inference.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -50,11 +51,12 @@ Time series forecasting, neural architecture search, linear input-varying system
 
 % ==================== CHAPTERS ====================
 \input{ch1}  % Introduction
-\input{ch2}  % Background and Related Work
-\input{ch3}  % LIV-TS Methodology
-\input{ch4}  % Experiments
-\input{ch5}  % Discussion
-\input{ch6}  % Conclusion
+\input{ch2}  % Related Work
+\input{ch3}  % Preliminaries
+\input{ch4}  % LIV-TS Methodology
+\input{ch5}  % Experiments
+\input{ch6}  % Discussion
+\input{ch7}  % Conclusion
 
 % ==================== REFERENCES ====================
 \bibliographystyle{IEEEtran}

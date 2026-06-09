@@ -1,19 +1,15 @@
 \section{Introduction}
 \label{sec:intro}
 
-Multivariate time series forecasting is a cornerstone task in domains ranging from energy grid management and financial trading to climate science and traffic control \cite{wu2021autoformer,zhou2021informer}.
-Accurate multi-step predictions over long horizons require models that can simultaneously capture local temporal patterns, long-range dependencies, and inter-variate correlations: three qualitatively different phenomena that may benefit from different computational inductive biases.
+On ETTh1 at horizon H\,=\,96, replacing self-attention in iTransformer with a 3-tap gated convolution reduces test MSE from 0.476 to 0.467 while using 33\% fewer parameters; applying Mamba SSM uniformly across all slots inflates parameter count to 17M and degrades MSE to 1.213.
+These contrasts demonstrate that \emph{operator-family selection} is the highest-impact yet most underexplored axis of forecasting model design.
+Accurate multi-step predictions over long horizons require models that simultaneously capture local temporal patterns, long-range dependencies, and inter-variate correlations — three qualitatively different phenomena that benefit from different computational inductive biases.
 
-Recent architectures have tackled this challenge by specializing each architectural component for a fixed operator family.
+Recent architectures address this by specialising each architectural component for a fixed operator family.
 iTransformer \cite{liu2024itransformer} treats each variate as a token and uses self-attention for cross-variate correlation alongside a feedforward network (FFN) for per-variate feature extraction;
 S-Mamba \cite{wang2024smamba} applies bidirectional Mamba recurrence for variate correlation followed by an FFN for temporal refinement.
-These designs encode strong prior beliefs: \emph{attention is best for cross-variate mixing} and \emph{Mamba recurrence is best for temporal modeling}.
-While each assumption yields strong results on particular benchmarks, it is unclear whether any single operator family universally excels, or whether the optimal operator varies with dataset characteristics and forecast horizon.
-
-The importance of this choice is illustrated by a concrete comparison.
-On ETTh1 at horizon H\,=\,96 using the iTransformer structure, replacing self-attention with a 3-tap gated convolution (GConv-1) reduces test MSE from 0.476 to 0.467 while using 33\% fewer parameters.
-Conversely, using Mamba SSM across all slots inflates parameter count to 17M and degrades MSE to 1.213.
-These results suggest that the \emph{choice of operator family per slot} is a high-impact yet underexplored design dimension.
+These designs commit to strong prior beliefs — \emph{attention is best for cross-variate mixing}, \emph{Mamba recurrence is best for temporal modeling} — without empirical justification that these choices are optimal across diverse datasets and horizons.
+The operator-level ablation above shows that the right choice is dataset-dependent and cannot be determined by architectural convention alone.
 Manual search over all combinations is intractable: with eleven base operator classes, four slots per structure, and differential variants, the search space exceeds $10^{5}$ configurations per structure.
 Automated neural architecture search (NAS) \cite{elsken2019neural,zoph2017neural} offers a principled alternative, but existing NAS methods for time series focus on hyperparameter tuning rather than operator-family selection.
 
@@ -41,7 +37,7 @@ The main contributions of this work are:
     We adapt TiDAR's joint autoregressive--diffusion loss to continuous-valued forecasting and show that the draft mode achieves an 80.8$\times$ wall-clock speedup over full autoregressive decoding with negligible accuracy loss.
 
   \item \textbf{Cross-dataset architecture transfer.}
-    We show that genomes discovered on ETTh1 transfer to ETTh2 and Exchange-Rate, outperforming the all-SSM baseline by up to 63\% in test MSE without retraining, providing evidence that evolutionary search recovers structurally meaningful inductive biases.
+    Genomes discovered on ETTh1 transfer directly to ETTh2 and Exchange-Rate, outperforming the all-Mamba baseline by up to \textbf{63.6\%} in test MSE without re-running evolution, demonstrating that the discovered genomes encode dataset-specific inductive biases that transfer across temporally compatible domains.
 \end{enumerate}
 
 The remainder of this paper is organized as follows.

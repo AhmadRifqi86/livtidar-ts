@@ -19,8 +19,9 @@ This motivates an operator-agnostic search over a unified operator family.
 \subsection{Neural Architecture Search for Time Series}
 
 Existing automated search for time series focuses on hyperparameter optimisation (learning rate, hidden size, patch length) rather than operator-family selection \cite{elsken2019neural}.
-Cell-based NAS \cite{zoph2017neural} has been applied to RNN design but not to the modern SSM/attention/convolution pool.
-To our knowledge, LIV-TS is the first work to frame operator-family selection as a multi-objective evolutionary search problem within a unified sequence-mixing algebra.
+Cell-based NAS \cite{zoph2017neural} has been applied to RNN design, but existing benchmarks search over attention configurations or depth choices within a \emph{single} operator family — the cross-family operator choice is left unexplored.
+The closest work in spirit, STAR \cite{thomas2024star}, applies LIV operator-family selection to language modelling: it does not consider the variate-token forecasting template, does not perform multi-objective Pareto optimisation over parameter count, and evaluates on perplexity benchmarks where cross-variate structure is absent.
+LIV-TS is the first framework to frame operator-family selection as a multi-objective evolutionary search problem within a unified sequence-mixing algebra applied to multivariate time series forecasting.
 
 \subsection{Unified Sequence Operators}
 

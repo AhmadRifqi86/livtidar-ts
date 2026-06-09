@@ -306,7 +306,9 @@ They are included here as the direct conceptual predecessors of CfC, which is th
 \subsection{CfC Networks and their LIV Representation}
 \label{sec:cfc_liv}
 
-CfC (Closed-form Continuous-time) networks \cite{hasani2021cfc}, derived from Liquid Time-Constant neurons \cite{hasani2022liquid}, solve continuous-time recurrent dynamics in closed form.
+We choose CfC (Closed-form Continuous-time) networks \cite{hasani2021cfc} as the sole SEMI\_SEPARABLE operator in the LIV-TS pool because their complementary gating constraint ($g_t + (1{-}g_t)=1$) enforces a convex interpolation between the retained state and the new input at every step.
+This constraint prevents gradient vanishing through long recurrent products — a stability property that Mamba's unconstrained transition $A_k$ does not guarantee — and makes CfC well-suited to smooth continuous-valued signals such as exchange rates and temperature series where accumulated decay instability is a practical failure mode.
+Derived from Liquid Time-Constant neurons \cite{hasani2022liquid}, CfC solves continuous-time recurrent dynamics in closed form.
 The standard CfC state update is:
 \begin{equation}
   h_t = g_t \odot h_{t-1} + (1 - g_t) \odot \tilde{h}_t,
@@ -338,8 +340,7 @@ so each entry of $T(x)$ becomes:
   \left(\prod_{k=j}^{i-1} \sigma(W_g x_k)\right) \odot (1{-}\sigma(W_g x_j)) \odot W_{\mathrm{in}} x_j \Bigr\rangle.
   \label{eq:cfc_tij}
 \end{multline}
-The token-mixed output $\mathrm{mixed}_i = \sum_{j \le i} T_{ij}\,\mathbf{v}_j$ recovers precisely the CfC hidden state $h_i$ in Eq.~\eqref{eq:cfc_unrolled}.
-The complementary constraint $g_t + (1-g_t) = 1$ stabilises gradient flow through the cumulative product, making CfC well-suited to smooth continuous-valued signals such as exchange rates and temperature series.
+The token-mixed output $\mathrm{mixed}_i = \sum_{j \le i} T_{ij}\,\mathbf{v}_j$ recovers precisely the CfC hidden state $h_i$ in Eq.~\eqref{eq:cfc_unrolled}, confirming that CfC is an exact instance of SEMI\_SEPARABLE token mixing and can be searched interchangeably with attention and convolution operators within the LIV genome.
 
 \subsection{NSGA-II}
 

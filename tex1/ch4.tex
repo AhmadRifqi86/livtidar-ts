@@ -367,6 +367,129 @@ Draft outputs are used as-is or overwritten by autoregressive refinement for the
 The balance coefficient $\alpha$ in Eq.~\eqref{eq:tidar_loss} controls how strongly the AR auxiliary task regularises the backbone.
 We treat $\alpha$ as a tunable hyperparameter and ablate values $\alpha \in \{0, 0.1, 0.5, 1.0, 2.0, 5.0\}$ in Section~\ref{sec:exp_alpha}.
 $\alpha = 0$ recovers pure parallel prediction; $\alpha \to \infty$ recovers a standard AR model with an auxiliary draft head.
+Figure~\ref{fig:tidar} illustrates the training setup and the three inference modes.
+
+\begin{figure}[t]
+\centering
+\resizebox{0.97\columnwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small, >=Stealth,
+  lbl/.style={font=\tiny, text=black!60},
+  arr/.style={->, draw=black!50, thin},
+  tok/.style={draw=#1!65, fill=#1!18, rounded corners=1pt,
+              minimum width=0.36cm, minimum height=0.30cm,
+              font=\tiny\bfseries, inner sep=0pt, align=center},
+  blk/.style={draw=#1!65, fill=#1!12, rounded corners=3pt,
+              minimum width=3.0cm, minimum height=0.44cm,
+              font=\scriptsize, align=center},
+]
+
+%% ====================================================
+%% (a) Training: tokens -> backbone -> dual heads
+%% ====================================================
+\node[font=\small\bfseries] at (1.55, 4.55) {(a) Training};
+
+%% Token row
+\foreach \i in {0,...,3} {
+  \node[tok=blue] at ({0.05+\i*0.38}, 4.10) {};
+}
+\node[lbl,font=\tiny\bfseries,text=blue!75] at (0.62, 3.88) {lookback ($L$)};
+\draw[black!25, thin, dashed] (1.64, 3.76) -- (1.64, 4.28);
+\foreach \i in {0,...,2} {
+  \node[tok=orange] at ({1.80+\i*0.38}, 4.10) {};
+}
+\node[lbl,font=\tiny\bfseries,text=orange!80!black] at (2.15, 3.88) {horizon ($H$)};
+
+%% Backbone
+\node[blk=black, minimum width=3.1cm] (bb) at (1.55, 3.28) {Backbone (hybrid mask)};
+\foreach \xv in {0.05,0.43,0.81,1.19,1.80,2.18,2.56} {
+  \draw[arr] (\xv, 3.95) -- (\xv, 3.51);
+}
+
+%% Two heads
+\node[blk=blue, minimum width=1.4cm] (arh) at (0.72, 2.55) {AR Head};
+\node[blk=orange, minimum width=1.4cm] (dfh) at (2.45, 2.55) {Draft Head};
+\draw[arr] (bb.south -| arh) -- (arh.north);
+\draw[arr] (bb.south -| dfh) -- (dfh.north);
+
+%% Loss labels
+\node[lbl,text=blue!70,align=center] at (0.72, 2.08) {$\mathcal{L}_{\mathrm{AR}}$\\{\tiny next-step on $x_{2..L}$}};
+\node[lbl,text=orange!75,align=center] at (2.45, 2.08) {$\mathcal{L}_{\mathrm{Diff}}$\\{\tiny parallel on $y_{1..H}$}};
+\draw[arr] (arh.south) -- (0.72, 1.80);
+\draw[arr] (dfh.south) -- (2.45, 1.80);
+
+%% Combined loss
+\draw[arr] (0.72, 1.64) |- (1.55, 1.46);
+\draw[arr] (2.45, 1.64) |- (1.55, 1.46);
+\node[blk=gray, minimum width=3.3cm] at (1.55, 1.24) {$\mathcal{L}=\dfrac{\alpha\,\mathcal{L}_{\mathrm{AR}}+\mathcal{L}_{\mathrm{Diff}}}{1+\alpha}$};
+
+%% Divider
+\draw[black!18, dashed, thin] (3.48, 0.72) -- (3.48, 4.65);
+
+%% ====================================================
+%% (b) Inference modes
+%% ====================================================
+\node[font=\small\bfseries] at (6.10, 4.55) {(b) Inference Modes};
+
+%% ---- Row 1: Pure draft ----
+\node[lbl,font=\scriptsize\bfseries,text=green!60!black,anchor=east] at (4.22,4.10) {Draft};
+\node[lbl,anchor=east] at (4.22,3.90) {$\mathcal{O}(1)$};
+\foreach \i in {0,...,3} {
+  \node[tok=blue] at ({4.38+\i*0.36},4.10) {};
+}
+\draw[arr] (5.80,4.10) -- (6.05,4.10);
+\node[lbl,font=\tiny,align=center] at (6.35,4.10) {1 fwd};
+\draw[arr] (6.65,4.10) -- (6.88,4.10);
+\foreach \i in {0,...,3} {
+  \node[tok=green] at ({6.99+\i*0.36},4.10) {};
+}
+\node[lbl,font=\tiny,text=green!60!black,anchor=west] at (8.45,4.10) {$\times 1$};
+
+%% ---- Row 2: Partial-AR ----
+\node[lbl,font=\scriptsize\bfseries,text=orange!70!black,anchor=east] at (4.22,3.20) {Partial};
+\node[lbl,anchor=east] at (4.22,3.00) {$\mathcal{O}(k)$};
+\foreach \i in {0,...,3} {
+  \node[tok=blue] at ({4.38+\i*0.36},3.20) {};
+}
+\draw[arr] (5.80,3.20) -- (6.05,3.20);
+\node[lbl,font=\tiny,align=center] at (6.35,3.20) {$k{+}1$ fwd};
+\draw[arr] (6.65,3.20) -- (6.88,3.20);
+\foreach \i in {0,1} {
+  \node[tok=orange] at ({6.99+\i*0.36},3.20) {};
+}
+\foreach \i in {2,3} {
+  \node[tok=green] at ({6.99+\i*0.36},3.20) {};
+}
+\node[lbl,font=\tiny,text=orange!70,anchor=west] at (6.96,2.98) {$\underbrace{\rule{0.72cm}{0pt}}_{k}$};
+\node[lbl,font=\tiny,text=green!60!black,anchor=west] at (7.72,2.98) {$\underbrace{\rule{0.72cm}{0pt}}_{H-k}$};
+
+%% ---- Row 3: Full-AR ----
+\node[lbl,font=\scriptsize\bfseries,text=orange!80!black,anchor=east] at (4.22,2.30) {Full-AR};
+\node[lbl,anchor=east] at (4.22,2.10) {$\mathcal{O}(H)$};
+\foreach \i in {0,...,3} {
+  \node[tok=blue] at ({4.38+\i*0.36},2.30) {};
+}
+\draw[arr] (5.80,2.30) -- (6.05,2.30);
+\node[lbl,font=\tiny,align=center] at (6.35,2.30) {$H$ fwd};
+\draw[arr] (6.65,2.30) -- (6.88,2.30);
+\foreach \i in {0,...,3} {
+  \node[tok=orange] at ({6.99+\i*0.36},2.30) {};
+}
+\node[lbl,font=\tiny,text=orange!80,anchor=west] at (8.45,2.30) {$\times H$};
+
+%% Legend
+\node[tok=blue]   at (4.38,1.38) {}; \node[lbl,anchor=west] at (4.60,1.38) {lookback};
+\node[tok=green]  at (5.68,1.38) {}; \node[lbl,anchor=west] at (5.90,1.38) {draft (parallel)};
+\node[tok=orange] at (7.26,1.38) {}; \node[lbl,anchor=west] at (7.48,1.38) {AR (sequential)};
+
+\end{tikzpicture}%
+}
+\caption{TiDAR-TS overview.
+  \textbf{(a) Training}: the $L{+}H$ token sequence is processed by the backbone under a hybrid sparsity mask---lookback tokens attend causally among themselves while horizon tokens attend bidirectionally to the entire lookback.
+  An AR head computes $\mathcal{L}_{\mathrm{AR}}$ (next-step prediction on lookback) and a Draft head computes $\mathcal{L}_{\mathrm{Diff}}$ (parallel prediction of all $H$ horizon steps).
+  \textbf{(b) Inference modes}: \emph{Draft} ($\mathcal{O}(1)$) predicts all $H$ steps in one forward pass; \emph{Partial-AR} ($\mathcal{O}(k)$) refines the first $k$ steps autoregressively and fills the rest with the draft; \emph{Full-AR} ($\mathcal{O}(H)$) applies $H$ sequential passes for maximum accuracy.}
+\label{fig:tidar}
+\end{figure}
 
 \subsection{NSGA-II Search Protocol}
 \label{sec:search}

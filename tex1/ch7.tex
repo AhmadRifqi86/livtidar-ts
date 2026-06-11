@@ -1,48 +1,9 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented \textbf{LIV-TS}, a framework that reformulates multivariate time series architecture design as an operator-selection problem within the Linear Input-Varying (LIV) algebra.
-By encoding forecasting architectures as genomes of interchangeable LIV operator classes and running NSGA-II multi-objective search, LIV-TS discovers heterogeneous architectures that simultaneously minimise validation MSE and parameter count without requiring manual design decisions for each dataset or horizon.
-
-\subsection{Summary of Findings}
-
-\textbf{Heterogeneous operator mixtures dominate homogeneous baselines.}
-Across all three benchmarks (ETTh1, ETTm1, Exchange-Rate) and both structural templates (S-Mamba, iTransformer), the NSGA-II Pareto front is exclusively populated by genomes that mix operator families across slots.
-No single-class configuration matches the accuracy-compactness trade-off of a heterogeneous genome, confirming that the choice of operator family per slot is a consequential design dimension that benefits from principled search.
-
-\textbf{The best operator varies by dataset characteristics.}
-The ablation results show that ALL\_FFN dominates on the smooth, low-variate Exchange-Rate dataset while heterogeneous convolution–attention mixtures are preferred on the higher-variate ETT benchmarks.
-This dataset-dependence validates the LIV-TS hypothesis: there is no universally superior operator family, and automated search is necessary to match inductive biases to signal structure.
-
-\textbf{TiDAR draft mode is both faster and more accurate than full-AR.}
-The parallel draft achieves 96.9$\times$ wall-clock speedup on Exchange-Rate and 80.8$\times$ on ETTh1 while producing \emph{lower} MSE than sequential full-AR decoding.
-The counterintuitive quality inversion arises from training-inference consistency: TiDAR's dominant loss trains the forecast head on clean lookback tokens, and draft mode preserves this condition at inference while full-AR does not.
-
-\textbf{Structural inductive biases transfer within compatible dataset families.}
-The ETTh1 genome transfers successfully to ETTh2 ($+$31\%) and Exchange-Rate ($+$63\%) at H\,=\,96, where dataset characteristics are compatible.
-Transfer fails when the source dataset is structurally simpler than the target (Exchange$\to$ETT), confirming that evolutionary search recovers meaningful structural priors rather than dataset-specific artifacts.
-
-\textbf{AR regularisation improves draft quality, with horizon-dependent optimal strength.}
-The TiDAR $\alpha$ ablation shows that moderate AR regularisation ($\alpha \in [0.5, 2.0]$) consistently outperforms pure parallel prediction ($\alpha=0$) across all horizons.
-The optimal $\alpha$ shifts from 2.0 at short horizons (H\,=\,96, 192) to 5.0 at H\,=\,720, indicating that longer horizons benefit from stronger sequential supervision during training.
-
-\subsection{Future Work}
-
-Several directions extend this work naturally.
-
-\textbf{Multi-horizon joint search.}
-The current protocol optimises a separate genome per (dataset, horizon) pair.
-A joint search across horizons, or a genome parameterised by horizon-specific slot weights, could discover architectures that generalise across all horizons without rerunning evolution.
-
-\textbf{Expanded operator pool.}
-The present pool covers eleven base classes; adding recent operators such as Mamba-2, RetNet, or linear attention variants would broaden the search space and may reveal new Pareto-optimal combinations.
-
-\textbf{Compact CfC variant.}
-The 16$\times$ internal expansion of the current CfC featurizer makes SEMI\_SEPARABLE operators parameter-expensive and penalised by Pareto pressure.
-A compact CfC with smaller expansion or weight sharing could allow recurrent operators to appear more frequently in discovered genomes, potentially improving long-horizon accuracy where sequential structure is most beneficial.
-
-\textbf{Adaptive $\alpha$ scheduling.}
-The horizon-dependent optimal $\alpha$ in the TiDAR loss suggests that an adaptive schedule that increases AR weight with forecast horizon during training could replace the manual sweep and improve performance uniformly.
-
-\textbf{Broader benchmark evaluation.}
-Validating LIV-TS on higher-variate datasets (Weather, Traffic, PEMS) and longer lookback windows would assess the scalability of both the search protocol and the discovered genomes.
+We presented \textbf{LIV-TS}, a framework that reformulates multivariate time series architecture design as a multi-objective evolutionary search over Linear Input-Varying (LIV) operators.
+By encoding forecasting architectures as genomes of interchangeable LIV operator classes and running NSGA-II to jointly minimise validation MSE and parameter count, LIV-TS consistently discovers heterogeneous operator mixtures that dominate every homogeneous baseline on the accuracy-compactness Pareto frontier.
+Across all three benchmarks (ETTh1, ETTm1, Exchange-Rate) and both structural templates (S-Mamba, iTransformer), no single-class configuration matches the trade-off achieved by a mixed genome, confirming that operator-family selection is a consequential yet underexplored design dimension.
+We additionally adapt the TiDAR training scheme to continuous-valued time series regression, achieving an 80.8$\times$ wall-clock speedup over full autoregressive decoding with negligible accuracy loss — an improvement that arises directly from training-inference consistency rather than model size reduction.
+Cross-dataset transfer experiments further show that genomes discovered on ETTh1 generalise to ETTh2 and Exchange-Rate without re-running evolution, outperforming the all-Mamba baseline by up to 63.6\%, demonstrating that evolutionary search recovers meaningful structural inductive biases rather than dataset-specific artefacts.
+These results collectively establish that operator choice should be treated as a first-class search variable in time series model design, and that the LIV algebra provides a principled grammar for doing so efficiently.

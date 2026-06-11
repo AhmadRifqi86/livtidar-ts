@@ -1,6 +1,5 @@
-%% IEEE TNNLS Blinded Manuscript for Peer Review
-%%
-\documentclass[journal]{IEEEtran}
+%% Conference version (condensed)
+\documentclass[conference]{IEEEtran}
 
 % *** PACKAGES ***
 \usepackage{amsmath,amssymb,amsfonts}
@@ -22,12 +21,9 @@
 
 \begin{document}
 
-\title{LIV-TS: Evolutionary Architecture Search for Time Series Forecasting\\via Linear Input-Varying Systems}
+\title{LIV-TS: Evolutionary Architecture Search for Time Series Forecasting via Linear Input-Varying Systems}
 
 \author{Anonymous Authors}
-
-\markboth{IEEE Transactions on Neural Networks and Learning Systems}%
-{LIV-TS: Evolutionary Architecture Search for Time Series Forecasting}
 
 \maketitle
 
@@ -39,7 +35,7 @@ We propose \textbf{LIV-TS}, a framework that casts time series forecasting archi
 LIV provides a unified parameterization of attention, state-space models (SSMs), gated convolutions, and feedforward networks under a single token-mixing matrix whose structure determines the operator family.
 We instantiate LIV operators inside two established forecasting structures (S-Mamba and iTransformer) and apply NSGA-II \cite{deb2002nsga2} to jointly optimize forecasting accuracy and model compactness.
 Additionally, we adapt the Think-in-Diffusion Autoregressive (TiDAR) \cite{tidar2024} training scheme for continuous-valued time series, enabling parallel draft prediction with optional autoregressive refinement.
-Experiments on the ETT benchmark and Exchange-Rate dataset reveal that evolutionary search consistently discovers \emph{heterogeneous} operator mixtures that occupy Pareto-optimal operating points no homogeneous baseline can match: on ETTh1 at $H\!=\!96$, the best mixed genome achieves MSE 0.464 at 1.2M parameters, matching the accuracy of the all-FFN baseline (MSE 0.454, 3.2M parameters) within 2\% at less than 40\% of its parameter cost — a trade-off unavailable to any single-operator configuration.
+Experiments on the ETT benchmark and Exchange-Rate dataset reveal that evolutionary search consistently discovers \emph{heterogeneous} operator mixtures that occupy Pareto-optimal operating points no homogeneous baseline can match: on ETTh1 at $H\!=\!96$, the best mixed genome achieves MSE 0.464 at 1.2M parameters, matching the accuracy of the all-FFN baseline (MSE 0.454, 3.2M parameters) within 2\% at less than 40\% of its parameter cost --- a trade-off unavailable to any single-operator configuration.
 Our results demonstrate that operator-family selection is a critical yet underexplored axis of time series model design, and that evolutionary search over a unified LIV operator pool reliably identifies compact, accurate architectures whose structural biases transfer across temporally compatible datasets and support fast parallel inference.
 \end{abstract}
 
@@ -53,7 +49,7 @@ Time series forecasting, neural architecture search, linear input-varying system
 \input{ch3}  % Preliminaries
 \input{ch4}  % LIV-TS Methodology
 \input{ch5}  % Experiments
-\input{ch6}  % Discussion
+\input{ch6_conf}  % Discussion (condensed)
 \input{ch7}  % Conclusion
 
 % ==================== REFERENCES ====================

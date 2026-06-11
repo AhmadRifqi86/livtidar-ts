@@ -9,7 +9,7 @@ ETTh1 \cite{zhou2021ett} (17{,}420 time-steps, 7 variates, hourly electricity tr
 ETTm1 \cite{zhou2021ett} (69{,}680 time-steps, 7 variates, 15-minute resolution);
 and Exchange-Rate \cite{wu2021autoformer} (7{,}588 time-steps, 8 currency exchange rates).
 For each dataset we report three forecast horizons: $H \in \{96, 336, 720\}$ with a fixed lookback window $L = 96$.
-Data is split 70/10/20 for train/validation/test and normalised per variate with Reversible Instance Normalisation (RevIN \cite{kim2022revin}).
+Data are partitioned 70\%, 10\%, and 20\% into training, validation, and test sets, respectively, and normalised per variate with Reversible Instance Normalisation (RevIN \cite{kim2022revin}).
 
 \textbf{Structures.}
 All experiments use two structural templates: S-Mamba (4 genome slots split evenly between variate and temporal backbones) and iTransformer (4 genome slots alternating cross-variate and per-variate sub-layers).

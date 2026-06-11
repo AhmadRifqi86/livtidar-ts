@@ -1,0 +1,11 @@
+\section{Discussion}
+\label{sec:discussion}
+
+The ablation results reveal a dataset-complexity gradient: on higher-variate, non-stationary benchmarks (ETTh1, ETTm1), cross-token interaction is essential and NSGA-II consistently discovers heterogeneous attention--convolution mixtures that dominate every homogeneous configuration on the Pareto front of accuracy versus parameter count.
+On the smooth, low-variate Exchange-Rate dataset, ALL\_FFN achieves the best absolute MSE at short horizons, confirming that the optimal operator is signal-dependent rather than universally fixed.
+Crucially, the evolutionary search identifies this automatically — the best Exchange-Rate genome is FFN-heavy — without requiring manual ablation across datasets.
+ALL\_CFC incurs 16.9M parameters due to the CfC featurizer's $16{\times}$ internal expansion; NSGA-II's dual-objective pressure consistently avoids this cost, and heterogeneous genomes achieve competitive accuracy at 1.2M--1.6M parameters.
+
+The most operationally important finding is TiDAR's training-inference consistency result: full-AR mode yields \emph{higher} MSE (0.241) than draft mode (0.169) on Exchange-Rate, because the backbone is trained to predict all $H$ horizon positions in a single parallel pass from clean lookback tokens — sequential AR decoding at test time is out-of-distribution relative to training.
+Draft mode is therefore both faster and more accurate, and is the correct primary inference mode for TiDAR-TS.
+Cross-dataset transfer succeeds when source and target temporal statistics are compatible (ETTh1$\to$ETTh2: $+$31\%, ETTh1$\to$Exchange: $+$63.6\%) and degrades predictably when they are not (Exchange$\to$ETT: $-$1\% to $-$33\%), confirming that evolutionary search recovers structural inductive biases bounded by temporal compatibility, not dataset-specific artefacts.

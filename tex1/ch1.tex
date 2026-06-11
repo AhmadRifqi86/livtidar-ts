@@ -1,15 +1,14 @@
 \section{Introduction}
 \label{sec:intro}
 
-On ETTh1 at horizon H\,=\,96, replacing self-attention in iTransformer with a 3-tap gated convolution reduces test MSE from 0.476 to 0.467 while using 33\% fewer parameters; applying Mamba SSM uniformly across all slots inflates parameter count to 17M and degrades MSE to 1.213.
-These contrasts demonstrate that \emph{operator-family selection} is the highest-impact yet most underexplored axis of forecasting model design.
-Accurate multi-step predictions over long horizons require models that simultaneously capture local temporal patterns, long-range dependencies, and inter-variate correlations — three qualitatively different phenomena that benefit from different computational inductive biases.
+On ETTh1 at $H\!=\!96$, filling all four operator slots of an iTransformer-style backbone with self-attention yields 874K parameters and test MSE 0.555; replacing every slot with a gated feedforward network improves MSE to 0.454 but inflates parameter count to 3.2M — a 3.7$\times$ cost for an 18\% accuracy gain.
+A heterogeneous genome discovered by NSGA-II, mixing attention and convolution variants across slots, reaches MSE 0.464 at 1.2M parameters: within 2\% of the best single-class accuracy at less than 40\% of its parameter budget.
+No fixed-operator assignment achieves this trade-off, demonstrating that \emph{operator-family selection} is a consequential yet underexplored axis of forecasting model design whose optimum cannot be determined by architectural convention alone.
 
 Recent architectures address this by specialising each architectural component for a fixed operator family.
 iTransformer \cite{liu2024itransformer} treats each variate as a token and uses self-attention for cross-variate correlation alongside a feedforward network (FFN) for per-variate feature extraction;
 S-Mamba \cite{wang2024smamba} applies bidirectional Mamba recurrence for variate correlation followed by an FFN for temporal refinement.
 These designs commit to strong prior beliefs — \emph{attention is best for cross-variate mixing}, \emph{Mamba recurrence is best for temporal modeling} — without empirical justification that these choices are optimal across diverse datasets and horizons.
-The operator-level ablation above shows that the right choice is dataset-dependent and cannot be determined by architectural convention alone.
 Manual search over all combinations is intractable: with eleven base operator classes, four slots per structure, and differential variants, the search space exceeds $10^{5}$ configurations per structure.
 Automated neural architecture search (NAS) \cite{elsken2019neural,zoph2017neural} offers a principled alternative, but existing NAS methods for time series focus on hyperparameter tuning rather than operator-family selection.
 

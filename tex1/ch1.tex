@@ -9,7 +9,7 @@ Recent architectures address this by specialising each architectural component f
 iTransformer \cite{liu2024itransformer} treats each variate as a token and uses self-attention for cross-variate correlation alongside a feedforward network (FFN) for per-variate feature extraction;
 S-Mamba \cite{wang2024smamba} applies bidirectional Mamba recurrence for variate correlation followed by an FFN for temporal refinement.
 These designs commit to strong prior beliefs — \emph{attention is best for cross-variate mixing}, \emph{Mamba recurrence is best for temporal modeling} — without empirical justification that these choices are optimal across diverse datasets and horizons.
-Manual search over all combinations is intractable: with eleven base operator classes, four slots per structure, and differential variants, the search space exceeds $10^{5}$ configurations per structure.
+Manual search over all combinations is intractable: with nine base operator classes plus differential variants (18 total classes), four slots per structure, the search space exceeds $10^{5}$ configurations per structure.
 Automated neural architecture search (NAS) \cite{elsken2019neural,zoph2017neural} offers a principled alternative, but existing NAS methods for time series focus on hyperparameter tuning rather than operator-family selection.
 
 To address this gap, we propose \textbf{LIV-TS}, a framework built on two components.
@@ -24,25 +24,17 @@ This unification lets us treat all operators as interchangeable genome entries.
 Second, we encode each forecasting architecture as a genome of LIV class identifiers (one per operator slot) and run NSGA-II \cite{deb2002nsga2} to simultaneously minimize validation MSE and parameter count, with the Pareto frontier balancing accuracy against model compactness without requiring explicit weighting.
 Additionally, we integrate the Think-in-Diffusion Autoregressive (TiDAR) training scheme \cite{tidar2024} into LIV-TS, enabling parallel draft prediction of all $H$ future steps in a single forward pass with optional autoregressive refinement, which is particularly valuable for long-horizon settings where sequential decoding is prohibitively slow.
 
-The main contributions of this work are:
+This work makes four contributions:
 \begin{enumerate}
   \item \textbf{LIV-TS framework.}
-    We formalize time series forecasting architecture search within the LIV operator algebra, providing a clean genome encoding compatible with two structural templates (S-Mamba-style and iTransformer-style) and an operator pool that spans attention, convolution, SSM, and Closed-form Continuous-time (CfC) \cite{hasani2022liquid} recurrence classes.
+    We encode each forecasting architecture as a genome of LIV operator class IDs, compatible with two practical structural templates (S-Mamba and iTransformer), spanning attention, gated convolution, and CfC \cite{hasani2022liquid} recurrence families.
 
-  \item \textbf{Multi-objective evolutionary search.}
-    We demonstrate that NSGA-II discovers heterogeneous operator mixtures (combining convolution, attention, and SSM variants within a single model) that dominate any single-class baseline on the Pareto frontier of accuracy versus parameter count.
+  \item \textbf{Pareto-optimal heterogeneous search.}
+    NSGA-II over this genome space consistently finds operator mixtures that dominate every single-class baseline on the accuracy-vs-compactness Pareto frontier — a trade-off no fixed-operator design can replicate.
 
-  \item \textbf{TiDAR adaptation for continuous time series.}
-    We adapt TiDAR's joint autoregressive--diffusion loss to continuous-valued forecasting and show that the draft mode achieves an 80.8$\times$ wall-clock speedup over full autoregressive decoding with negligible accuracy loss.
+  \item \textbf{TiDAR for continuous forecasting.}
+    We adapt TiDAR's joint autoregressive-diffusion loss to continuous-valued regression and show that parallel draft mode is both 80.8$\times$ faster \emph{and} more accurate than sequential decoding, because the backbone trains for parallel prediction.
 
-  \item \textbf{Cross-dataset architecture transfer.}
-    Genomes discovered on ETTh1 transfer directly to ETTh2 and Exchange-Rate, outperforming the all-Mamba baseline by up to \textbf{63.6\%} in test MSE without re-running evolution, demonstrating that the discovered genomes encode dataset-specific inductive biases that transfer across temporally compatible domains.
+  \item \textbf{Architecture transfer without re-search.}
+    Genomes found on ETTh1 transfer directly to ETTh2 and Exchange-Rate ($+$63.6\% over all-Mamba at H\,=\,96), confirming that evolutionary search recovers structural inductive biases rather than dataset-specific artefacts.
 \end{enumerate}
-
-The remainder of this paper is organized as follows.
-Section~\ref{sec:background} reviews existing time series forecasting architectures and related work on NAS and unified sequence operators.
-Section~\ref{sec:prelim} introduces the technical foundations: the LIV operator algebra, CfC networks, NSGA-II, and TiDAR.
-Section~\ref{sec:method} describes the LIV-TS genome encoding, structural templates, fitness evaluation, and TiDAR adaptation.
-Section~\ref{sec:experiments} presents experiments on operator ablation, full architecture search, TiDAR speedup, and cross-dataset transfer.
-Section~\ref{sec:discussion} analyzes when heterogeneous architectures outperform single-operator models and characterizes the discovered Pareto fronts.
-Section~\ref{sec:conclusion} concludes and outlines future directions.

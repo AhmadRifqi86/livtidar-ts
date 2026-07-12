@@ -28,8 +28,3 @@ LIV-TS is the first framework to frame operator-family selection as a multi-obje
 Mamba \cite{gu2023mamba} reframes SSMs as selective state spaces; Hyena \cite{poli2023hyena} generalises convolution to long implicit kernels.
 The LIV formalism \cite{thomas2024star,massaroli2024liv} subsumes these under a single token-mixing abstraction, making it a natural grammar for operator search.
 
-\subsection{Parallel Sequence Decoding}
-
-Standard autoregressive decoding is sequential and costly at long horizons.
-Non-autoregressive Transformers \cite{gu2018nonautoregressive} and diffusion language models demonstrate that parallel generation is viable in discrete settings.
-TiDAR \cite{tidar2024} extends this to a hybrid draft-then-refine framework; we adapt it to continuous-valued time series regression in Section~\ref{sec:tidar_adapt}.

@@ -6,219 +6,60 @@
 The LIV framework \cite{thomas2024star,massaroli2024liv} provides a unified algebraic view of sequence mixing operators.
 Its central insight is to replace the \emph{fixed} weight matrix of a standard linear layer with a weight that is \emph{assembled from the input itself}.
 
-In a standard linear layer the output is $Y = Wx$, where $W$ is a learned parameter independent of $x$.
-In a LIV block, four learned linear projections of $x$ first produce feature vectors $B$, $C$, $S$, $V$:
+In a LIV block, four learned projections of the input $x$ produce feature vectors $B$, $C$, $S$, $V$:
 \begin{equation}
   B = W_B x, \quad C = W_C x, \quad S = f_S(x), \quad V = W_V x,
   \label{eq:featurizer}
 \end{equation}
-where $W_B, W_C, W_V$ are plain \texttt{nn.Linear} layers and $f_S$ is either a linear layer or, for the input-dependent convolution case, a small two-layer MLP.
-These are called the \emph{featurizer}.
-
-The $L \times L$ token-mixing matrix $T$ is then \emph{assembled algebraically} from $B$, $C$, and $S$; the four projections have distinct roles:
-\begin{itemize}
-  \item $\mathbf{b}_j$ and $\mathbf{c}_i$ (rows of $B$ and $C$) dot-product to produce the scalar gate strength of each entry $T_{ij}$, measuring how strongly position $i$ attends to position $j$.
-  \item $S$ provides the structural modulator $\mathbf{s}_{ij}$ that encodes the operator pattern: a decay factor for SSMs, a kernel value for convolutions, or the constant $\mathbf{1}$ for attention.
-  \item $V$ carries the payload and never enters the construction of $T$; the token-mixed output is $T \cdot V$.
-\end{itemize}
+where $W_B, W_C, W_V$ are linear layers and $f_S$ is a linear or small MLP map.
+The $L \times L$ token-mixing matrix $T$ is then assembled algebraically: $B$ and $C$ determine gate strength via dot-product, $S$ encodes the structural pattern (decay, kernel, or identity), and $V$ carries the payload — never entering $T$ itself.
 
 Concretely, each entry of $T$ is:
 \begin{equation}
-  T_{ij} = \underbrace{\langle\mathbf{c}_i,\, \mathbf{s}_{ij} \odot \mathbf{b}_j\rangle}_{\text{gate strength modulated by structure}},
+  T_{ij} = \langle\mathbf{c}_i,\, \mathbf{s}_{ij} \odot \mathbf{b}_j\rangle,
   \label{eq:tij}
 \end{equation}
-where $\mathbf{s}_{ij} \in \mathbb{R}^d$ is the \emph{structural modulator} derived from $S$: for LOW\_RANK it is the all-ones vector; for SEMI\_SEPARABLE it is the element-wise cumulative product $\prod_{k=j}^{i-1}\mathbf{a}_k$ of transition vectors from $S$; for TOEPLITZ it is a scalar $K_{i-j}$ broadcast from $S$.
-
-The full LIV forward pass is:
+where $\mathbf{s}_{ij} \in \mathbb{R}^d$ is the \emph{structural modulator} from $S$: the all-ones vector for LOW\_RANK, the cumulative product $\prod_{k=j}^{i-1}\mathbf{a}_k$ for SEMI\_SEPARABLE, and a scalar $K_{i-j}$ for TOEPLITZ.
+The output is:
 \begin{align}
-  \mathrm{mixed}_i &= \sum_j T_{ij} \cdot \mathbf{v}_j, \quad \mathbf{v}_j = \text{$j$-th row of } V,
+  \mathrm{mixed}_i &= \sum_j T_{ij} \cdot \mathbf{v}_j,
   \label{eq:token_mix} \\
   Y_i &= W \cdot \mathrm{mixed}_i,
   \label{eq:channel_mix}
 \end{align}
-where $W$ is a \emph{static} \texttt{nn.Parameter}, a fixed learned matrix independent of $x$.
-Figure~\ref{fig:liv_block} summarises the three-stage computation.
-
-\begin{figure}[t]
-\centering
-\resizebox{0.97\columnwidth}{!}{%
-\begin{tikzpicture}[
-  font=\scriptsize, >=Stealth,
-  tok/.style={circle,draw=black!65,fill=white,minimum size=0.28cm,inner sep=0pt},
-  bnd/.style={circle,draw=blue!60,fill=blue!18,minimum size=0.22cm,inner sep=0pt},
-  cnd/.style={circle,draw=red!55,fill=red!14,minimum size=0.22cm,inner sep=0pt},
-  snd/.style={circle,draw=orange!60,fill=orange!16,minimum size=0.22cm,inner sep=0pt},
-  vnd/.style={circle,draw=green!55,fill=green!16,minimum size=0.22cm,inner sep=0pt},
-  ond/.style={circle,draw=black!55,fill=yellow!28,minimum size=0.26cm,inner sep=0pt},
-  ynd/.style={circle,draw=black!50,fill=blue!12,minimum size=0.28cm,inner sep=0pt},
-  fc/.style={->,very thin,draw=black!25},
-  mc/.style={->,thin,draw=black!50},
-  lbl/.style={font=\tiny,text=black!68},
-]
-%% All node positions spelled out explicitly (y: 0, -0.48, -0.96, -1.44)
-
-%% ---- Input ----
-\node[tok] (Xa) at (0, 0.00) {};  \node[lbl,anchor=east] at (-0.18, 0.00) {$x_1$};
-\node[tok] (Xb) at (0,-0.48) {};  \node[lbl,anchor=east] at (-0.18,-0.48) {$x_2$};
-\node[tok] (Xc) at (0,-0.96) {};  \node[lbl,anchor=east] at (-0.18,-0.96) {$x_3$};
-\node[tok] (Xd) at (0,-1.44) {};  \node[lbl,anchor=east] at (-0.18,-1.44) {$x_4$};
-
-%% ---- Featurizer: B C S V columns ----
-\node[bnd] (Ba) at (1.10, 0.00) {};  \node[cnd] (Ca) at (1.48, 0.00) {};
-\node[snd] (Sa) at (1.86, 0.00) {};  \node[vnd] (Va) at (2.24, 0.00) {};
-\node[bnd] (Bb) at (1.10,-0.48) {};  \node[cnd] (Cb) at (1.48,-0.48) {};
-\node[snd] (Sb) at (1.86,-0.48) {};  \node[vnd] (Vb) at (2.24,-0.48) {};
-\node[bnd] (Bc) at (1.10,-0.96) {};  \node[cnd] (Cc) at (1.48,-0.96) {};
-\node[snd] (Sc) at (1.86,-0.96) {};  \node[vnd] (Vc) at (2.24,-0.96) {};
-\node[bnd] (Bd) at (1.10,-1.44) {};  \node[cnd] (Cd) at (1.48,-1.44) {};
-\node[snd] (Sd) at (1.86,-1.44) {};  \node[vnd] (Vd) at (2.24,-1.44) {};
-
-%% x -> B C S V
-\draw[fc,blue!50]   (Xa)--(Ba); \draw[fc,red!42]    (Xa)--(Ca);
-\draw[fc,orange!50] (Xa)--(Sa); \draw[fc,green!48]  (Xa)--(Va);
-\draw[fc,blue!50]   (Xb)--(Bb); \draw[fc,red!42]    (Xb)--(Cb);
-\draw[fc,orange!50] (Xb)--(Sb); \draw[fc,green!48]  (Xb)--(Vb);
-\draw[fc,blue!50]   (Xc)--(Bc); \draw[fc,red!42]    (Xc)--(Cc);
-\draw[fc,orange!50] (Xc)--(Sc); \draw[fc,green!48]  (Xc)--(Vc);
-\draw[fc,blue!50]   (Xd)--(Bd); \draw[fc,red!42]    (Xd)--(Cd);
-\draw[fc,orange!50] (Xd)--(Sd); \draw[fc,green!48]  (Xd)--(Vd);
-
-\node[lbl,text=blue!60,  anchor=south] at (1.10,0.17) {$B$};
-\node[lbl,text=red!52,   anchor=south] at (1.48,0.17) {$C$};
-\node[lbl,text=orange!60,anchor=south] at (1.86,0.17) {$S$};
-\node[lbl,text=green!55, anchor=south] at (2.24,0.17) {$V$};
-\draw[dashed,black!28,rounded corners=2pt] (0.88,0.20) rectangle (2.43,-1.64);
-\node[lbl,rotate=90,text=black!55] at (0.65,-0.72) {Featurizer};
-
-%% ---- T matrix (SEMI_SEP, tlx=2.90 tty=0.24 ts=0.48) ----
-\foreach \row in {1,2,3,4} {
-  \foreach \col in {1,2,3,4} {
-    \pgfmathtruncatemacro{\fil}{\col<=\row ? 1 : 0}
-    \ifnum\fil=1
-      \fill[green!22,opacity=0.85]
-        ({2.90+(\col-1)*0.48},{0.24-(\row-1)*0.48}) rectangle ++(0.48,-0.48);
-    \fi
-    \draw[black!14,ultra thin]
-      ({2.90+(\col-1)*0.48},{0.24-(\row-1)*0.48}) rectangle ++(0.48,-0.48);
-  }
-}
-\draw[black!60,thin] (2.90,0.24) rectangle (4.82,-1.68);
-\node[lbl,anchor=north] at (3.86,-1.70) {$T_{ij}(B,C,S)$ -- Token Mix};
-\node[lbl,text=black!45,anchor=north] at (3.86,-1.86) {(SEMI\_SEP)};
-
-%% B_j -> top of T column j (shifted right of col center to separate from V' arrows)
-\draw[fc,blue!55] (Ba.east) to[out=0,in=90] (3.22,0.24);
-\draw[fc,blue!55] (Bb.east) to[out=0,in=90] (3.70,0.24);
-\draw[fc,blue!55] (Bc.east) to[out=0,in=90] (4.18,0.24);
-\draw[fc,blue!55] (Bd.east) to[out=0,in=90] (4.66,0.24);
-%% C_i -> left of T row i  (row centers: 0.00, -0.48, -0.96, -1.44)
-\draw[fc,red!45] (Ca.east) -- (2.90, 0.00);
-\draw[fc,red!45] (Cb.east) -- (2.90,-0.48);
-\draw[fc,red!45] (Cc.east) -- (2.90,-0.96);
-\draw[fc,red!45] (Cd.east) -- (2.90,-1.44);
-%% S: structural modulator (dashed representative arrow)
-\draw[fc,orange!55,dashed] (Sb.east) to[out=0,in=180] (3.86,-0.48);
-
-%% ---- V' circles ABOVE T: payload column vector entering T from the top ----
-%% V_i (featurizer, x=2.24) fans diagonally up to V'_j above each T column
-\node[vnd] (VPa) at (3.14,0.72) {};  \node[lbl,anchor=south,text=green!65] at (3.14,0.80) {$V_1$};
-\node[vnd] (VPb) at (3.62,0.72) {};  \node[lbl,anchor=south,text=green!65] at (3.62,0.80) {$V_2$};
-\node[vnd] (VPc) at (4.10,0.72) {};  \node[lbl,anchor=south,text=green!65] at (4.10,0.80) {$V_3$};
-\node[vnd] (VPd) at (4.58,0.72) {};  \node[lbl,anchor=south,text=green!65] at (4.58,0.80) {$V_4$};
-
-%% V_i -> V'_i: diagonal fan-up (featurizer payload to column vector above T)
-\draw[fc,green!55] (Va.east) to[out=60,in=200] (VPa.west);
-\draw[fc,green!55] (Vb.east) to[out=55,in=210] (VPb.west);
-\draw[fc,green!55] (Vc.east) to[out=50,in=215] (VPc.west);
-\draw[fc,green!55] (Vd.east) to[out=45,in=220] (VPd.west);
-
-%% V'_j -> top of T column j: payload enters the matrix multiplication from above
-\draw[mc,green!60] (VPa.south) -- (3.14,0.24);
-\draw[mc,green!60] (VPb.south) -- (3.62,0.24);
-\draw[mc,green!60] (VPc.south) -- (4.10,0.24);
-\draw[mc,green!60] (VPd.south) -- (4.58,0.24);
-
-%% ---- Output nodes: out_i = row_i(T) * V ----
-\node[ond] (Oa) at (5.30, 0.00) {};
-\node[ond] (Ob) at (5.30,-0.48) {};
-\node[ond] (Oc) at (5.30,-0.96) {};
-\node[ond] (Od) at (5.30,-1.44) {};
-\node[lbl,anchor=south] at (5.30,0.17) {$T{\cdot}V$};
-\draw[mc] (4.82, 0.00) -- (Oa.west);
-\draw[mc] (4.82,-0.48) -- (Ob.west);
-\draw[mc] (4.82,-0.96) -- (Oc.west);
-\draw[mc] (4.82,-1.44) -- (Od.west);
-
-%% ---- Channel mix W (center 6.20, width 0.30 -> west=6.05 east=6.35) ----
-\node[draw=black!55,fill=gray!10,rounded corners=2pt,
-      minimum width=0.30cm,minimum height=1.68cm] at (6.20,-0.72) {};
-\node[lbl,anchor=south] at (6.20,0.17) {$W$};
-\draw[fc] (Oa.east) -- (6.05, 0.00);
-\draw[fc] (Ob.east) -- (6.05,-0.48);
-\draw[fc] (Oc.east) -- (6.05,-0.96);
-\draw[fc] (Od.east) -- (6.05,-1.44);
-
-%% ---- Output Y ----
-\node[ynd] (Ya) at (7.00, 0.00) {};  \node[lbl,anchor=west] at (7.15, 0.00) {$y_1$};
-\node[ynd] (Yb) at (7.00,-0.48) {};  \node[lbl,anchor=west] at (7.15,-0.48) {$y_2$};
-\node[ynd] (Yc) at (7.00,-0.96) {};  \node[lbl,anchor=west] at (7.15,-0.96) {$y_3$};
-\node[ynd] (Yd) at (7.00,-1.44) {};  \node[lbl,anchor=west] at (7.15,-1.44) {$y_4$};
-\node[lbl,anchor=south] at (7.00,0.17) {$Y$};
-\draw[fc] (6.35, 0.00) -- (Ya.west);
-\draw[fc] (6.35,-0.48) -- (Yb.west);
-\draw[fc] (6.35,-0.96) -- (Yc.west);
-\draw[fc] (6.35,-1.44) -- (Yd.west);
-
-\end{tikzpicture}%
-}
-\caption{LIV block as a neural network diagram ($L{=}4$ positions, SEMI\_SEP operator).
-  Each input $x_i$ is projected by the featurizer into four roles: key $B$ (blue), query $C$ (red), structural $S$ (orange), and payload $V$ (green).
-  $B_j$ enters column $j$ of $T$ from the top-right; $C_i$ enters row $i$ from the left; $S$ modulates the structural pattern (dashed).
-  The payload vector $V$ (green circles above $T$) is the \emph{input being multiplied} by the assembled weight matrix $T$: each $V_j$ descends into column $j$ and the row-wise dot product $\mathrm{out}_i = \sum_j T_{ij}V_j$ exits on the right.
-  The lower-triangular fill of $T$ enforces causality (SEMI\_SEP).
-  A static weight $W$ then mixes channels to yield $Y$.}
-\label{fig:liv_block}
-\end{figure}
+where $W$ is a static learned parameter independent of $x$.
 
 \subsubsection{Token Mixing Families}
 
-Four choices of how $S$ constructs $\mathbf{s}_{ij}$ span the space of practical sequence operators.
+Four choices of structural modulator $\mathbf{s}_{ij}$ span the space of practical sequence operators.
 
-\textbf{LOW\_RANK}: $\mathbf{s}_{ij} = \mathbf{1}/\sqrt{d}$ (constant, S unused):
+\textbf{LOW\_RANK} ($\mathbf{s}_{ij} = \mathbf{1}/\sqrt{d}$):
 \begin{equation}
-  T_{ij} = \langle\mathbf{c}_i,\, \mathbf{b}_j\rangle / \sqrt{d}, \qquad T = CB^\top / \sqrt{d}.
+  T = CB^\top / \sqrt{d}.
 \end{equation}
-Every pair $(i,j)$ interacts with equal structural weight; row-wise softmax recovers multi-head attention \cite{vaswani2017attention}.
+Every pair $(i,j)$ interacts; row-wise softmax recovers multi-head attention \cite{vaswani2017attention}.
 Cost $\mathcal{O}(L^2 d)$; full bidirectional context.
 
-\textbf{SEMI\_SEPARABLE}: $\mathbf{s}_{ij} = \prod_{k=j}^{i-1}\mathbf{a}_k$ (S gives forget gate $\mathbf{a}_k$ per step):
+\textbf{SEMI\_SEPARABLE} ($\mathbf{s}_{ij} = \prod_{k=j}^{i-1}\mathbf{a}_k$, $\mathbf{a}_k \in (0,1)^d$ from $S$):
 \begin{equation}
-  T_{ij} = \left\langle\mathbf{c}_i,\; \left(\prod_{k=j}^{i-1}\mathbf{a}_k\right) \odot \mathbf{b}_j\right\rangle \;\; (j \le i), \quad T_{ij} = 0 \;\; (j > i),
+  T_{ij} = \left\langle\mathbf{c}_i,\; \left(\prod_{k=j}^{i-1}\mathbf{a}_k\right) \odot \mathbf{b}_j\right\rangle \;\; (j \le i), \quad T_{ij} = 0 \;\; (j > i).
 \end{equation}
-where $\mathbf{a}_k \in (0,1)^d$ is the per-step forget gate and $\mathbf{b}_j$ is the input contribution at position $j$.
-The structural product decays the contribution of position $j$ exponentially as it propagates to position $i$, computed once via \texttt{torch.cumprod}.
+The cumulative product decays older inputs exponentially, computed via \texttt{torch.cumprod}. Recovers SSMs and CfC.
 
-\textbf{TOEPLITZ}: $\mathbf{s}_{ij} = K_{i-j}\,\mathbf{1}$ (S provides scalar kernel, zero beyond window):
+\textbf{TOEPLITZ} ($\mathbf{s}_{ij} = K_{i-j}\,\mathbf{1}$, shift-invariant scalar kernel from $S$):
 \begin{equation}
   T_{ij} = \langle\mathbf{c}_i,\, \mathbf{b}_j\rangle \cdot K_{i-j}, \quad K_{i-j} = 0 \;\text{if}\; |i-j| \ge k.
 \end{equation}
-For a fixed kernel, $K$ is an \texttt{nn.Parameter}; for the input-dependent variant, a two-layer MLP maps the global average of $x$ to $K$ \cite{poli2023hyena}.
-Cost $\mathcal{O}(Lkd)$ for window size $k$.
+$K$ is a learned parameter (fixed kernel) or produced by a small MLP (input-dependent variant \cite{poli2023hyena}).
 
-\textbf{DIAGONAL}: $\mathbf{s}_{ij} = \mathbf{1}$ only when $i=j$, else zero (S unused):
+\textbf{DIAGONAL} ($\mathbf{s}_{ij} = \delta_{ij}$):
 \begin{equation}
-  T_{ij} = \langle\mathbf{c}_i,\, \mathbf{b}_i\rangle\,\delta_{ij}, \qquad \mathrm{mixed}_i = \langle\mathbf{c}_i,\, \mathbf{b}_i\rangle\;\mathbf{v}_i.
+  \mathrm{mixed}_i = \langle\mathbf{c}_i,\, \mathbf{b}_i\rangle\;\mathbf{v}_i.
 \end{equation}
-With $\mathbf{b}_i = \mathrm{SiLU}(W_{\mathrm{gate}}\,x_i)$, this recovers the SwiGLU FFN \cite{shazeer2020glu} at $\mathcal{O}(Ld)$ cost with no cross-token interaction.
+With $\mathbf{b}_i = \mathrm{SiLU}(W_{\mathrm{gate}}\,x_i)$ this recovers SwiGLU FFN \cite{shazeer2020glu} at $\mathcal{O}(Ld)$ with no cross-token interaction.
 
-The four families trade off context range against cost:
-\vspace{2pt}
-\begin{center}
-\small DIAGONAL $<$ TOEPLITZ $<$ SEMI\_SEPARABLE $\approx$ LOW\_RANK \quad (in context width)
-\end{center}
-\vspace{2pt}
-while SEMI\_SEPARABLE and DIAGONAL share $\mathcal{O}(Ld)$ recurrent complexity versus $\mathcal{O}(L^2d)$ for LOW\_RANK.
-Figure~\ref{fig:token_mixing} contrasts the four sparsity patterns of $T$.
+The four families trade off context range against cost — DIAGONAL $<$ TOEPLITZ $<$ SEMI\_SEPARABLE $\approx$ LOW\_RANK in context width — while SEMI\_SEPARABLE and DIAGONAL share $\mathcal{O}(Ld)$ complexity versus $\mathcal{O}(L^2d)$ for LOW\_RANK.
+Figure~\ref{fig:token_mixing} contrasts the four sparsity patterns.
 
 \begin{figure}[t]
 \centering
@@ -288,95 +129,34 @@ Figure~\ref{fig:token_mixing} contrasts the four sparsity patterns of $T$.
 
 \end{tikzpicture}%
 }
-\caption{The four LIV token-mixing families as $5{\times}5$ sparsity patterns of $T_{ij}$
-  (filled\,=\,nonzero).
-  \textbf{LOW\_RANK}: full matrix, every pair $(i,j)$ interacts -- recovers attention.
-  \textbf{SEMI\_SEP}: causal lower-triangular with per-step decay -- recovers SSMs and CfC.
-  \textbf{TOEPLITZ}: band-diagonal -- recovers local convolution ($k{=}1$ band shown).
-  \textbf{DIAGONAL}: main diagonal only -- recovers position-wise FFN\,/\,SwiGLU.}
+\caption{The four LIV token-mixing families as $5{\times}5$ sparsity patterns of $T_{ij}$ (filled\,=\,nonzero).
+  \textbf{LOW\_RANK}: full matrix — recovers attention.
+  \textbf{SEMI\_SEP}: causal lower-triangular with per-step decay — recovers SSMs and CfC.
+  \textbf{TOEPLITZ}: band-diagonal — recovers local convolution.
+  \textbf{DIAGONAL}: main diagonal only — recovers position-wise FFN\,/\,SwiGLU.}
 \label{fig:token_mixing}
 \end{figure}
-
-\subsection{Recurrent Sequence Models}
-
-Structured State-Space models (S4 \cite{gu2021s4}) and Mamba \cite{gu2023mamba} parameterise causal recurrences where a hidden state $h_t$ summarises all past inputs.
-Both belong to the SEMI\_SEPARABLE family in the LIV taxonomy: $S$ supplies the per-step transition scalar $A_k$ and the $T$ matrix unrolls the recurrence as a lower-triangular matrix of decayed contributions.
-They are included here as the direct conceptual predecessors of CfC, which is the SEMI\_SEPARABLE operator used in this work.
 
 \subsection{CfC Networks and their LIV Representation}
 \label{sec:cfc_liv}
 
-We choose CfC (Closed-form Continuous-time) networks \cite{hasani2021cfc} as the sole SEMI\_SEPARABLE operator in the LIV-TS pool because their complementary gating constraint ($g_t + (1{-}g_t)=1$) enforces a convex interpolation between the retained state and the new input at every step.
-This constraint prevents gradient vanishing through long recurrent products — a stability property that Mamba's unconstrained transition $A_k$ does not guarantee — and makes CfC well-suited to smooth continuous-valued signals such as exchange rates and temperature series where accumulated decay instability is a practical failure mode.
-Derived from Liquid Time-Constant neurons \cite{hasani2022liquid}, CfC solves continuous-time recurrent dynamics in closed form.
-The standard CfC state update is:
+We use CfC (Closed-form Continuous-time) networks \cite{hasani2021cfc} as the SEMI\_SEPARABLE operator in the LIV-TS pool.
+Their complementary gating constraint ($g_t + (1{-}g_t)=1$) enforces a convex interpolation between retained state and new input at every step, preventing gradient vanishing — a stability property Mamba's unconstrained transition $A_k$ does not guarantee.
+Derived from Liquid Time-Constant neurons \cite{hasani2022liquid}, the CfC state update is:
 \begin{equation}
   h_t = g_t \odot h_{t-1} + (1 - g_t) \odot \tilde{h}_t,
   \quad g_t = \sigma(W_g\,x_t + b_g),
   \label{eq:cfc_recurrence}
 \end{equation}
-where $g_t \in (0,1)^d$ is the \emph{forget gate} and $(1-g_t)$ is the \emph{input gate}.
-The complementary constraint $g_t + (1-g_t) = 1$ enforces a convex interpolation between the retained state and the new input $\tilde{h}_t = \tanh(W_{\mathrm{in}}\,x_t)$.
-
-\subsubsection{CfC as a SEMI\_SEPARABLE LIV Block}
-
-Unrolling Eq.~\eqref{eq:cfc_recurrence} from position $j$ to position $i$ shows that $h_i$ is a weighted sum of all past inputs:
-\begin{equation}
-  h_i = \sum_{j=0}^{i} \underbrace{\left(\prod_{k=j+1}^{i} g_k\right)}_{\text{survival}} \odot \underbrace{(1-g_j) \odot \tilde{h}_j}_{\text{input at }j}.
-  \label{eq:cfc_unrolled}
-\end{equation}
-This is exactly the SEMI\_SEPARABLE token mixing.
-The LIV featurizer for CfC maps each input token to:
-\begin{alignat}{2}
-  \mathbf{b}_j &= (1-g_j) \odot W_{\mathrm{in}}\,x_j, &\quad
-  \mathbf{a}_k &= g_k = \sigma(W_g\,x_k), \nonumber \\
-  \mathbf{c}_i &= W_C\,x_i, &\quad
-  \mathbf{v}_j &= W_V\,x_j,
-  \label{eq:cfc_featurizer}
-\end{alignat}
-so each entry of $T(x)$ becomes:
-\begin{multline}
-  T_{ij} = \Bigl\langle W_C x_i, \\
-  \left(\prod_{k=j}^{i-1} \sigma(W_g x_k)\right) \odot (1{-}\sigma(W_g x_j)) \odot W_{\mathrm{in}} x_j \Bigr\rangle.
-  \label{eq:cfc_tij}
-\end{multline}
-The token-mixed output $\mathrm{mixed}_i = \sum_{j \le i} T_{ij}\,\mathbf{v}_j$ recovers precisely the CfC hidden state $h_i$ in Eq.~\eqref{eq:cfc_unrolled}, confirming that CfC is an exact instance of SEMI\_SEPARABLE token mixing and can be searched interchangeably with attention and convolution operators within the LIV genome.
+where $g_t \in (0,1)^d$ is the forget gate and $\tilde{h}_t = \tanh(W_{\mathrm{in}}\,x_t)$ is the candidate state.
+Unrolling this recurrence shows that $h_i$ is a weighted sum of all past inputs with the cumulative product $\prod_{k} g_k$ as the structural modulator $\mathbf{s}_{ij}$ — exactly the SEMI\_SEPARABLE pattern — confirming that CfC can be searched interchangeably with attention and convolution operators within the LIV genome.
 
 \subsection{NSGA-II}
 
-NSGA-II \cite{deb2002nsga2} is a fast elitist evolutionary algorithm for multi-objective optimisation.
-It maintains a population ranked by Pareto dominance: an individual $a$ dominates $b$ if $a$ is no worse than $b$ on all objectives and strictly better on at least one.
-Rank-0 individuals form the Pareto front.
-Within each rank, crowding distance prioritises individuals in sparse objective-space regions, preserving diversity.
-Parents are selected by tournament on (rank, crowding distance); offspring are produced by multi-point crossover and per-gene mutation.
-Elitism preserves the top individuals across generations, guaranteeing monotone improvement of the Pareto front.
-Algorithm~\ref{alg:nsga2} summarises the procedure as applied in LIV-TS.
-
-\begin{algorithm}[t]
-\caption{NSGA-II for LIV-TS Genome Search}
-\label{alg:nsga2}
-\begin{algorithmic}[1]
-\Require operator pool $\mathcal{P}$, genome length $N$, population size $M$, generations $G$, eval steps $N_{\mathrm{eval}}$
-\Ensure Pareto-front genome set $\mathcal{F}_0$
-\State Randomly initialise population $\mathcal{Q} \leftarrow \{g_1,\ldots,g_M\}$, $g_i \in \mathcal{P}^N$
-\For{each $g \in \mathcal{Q}$}
-    \State $(f_1, f_2) \leftarrow \bigl(\mathcal{L}_{\mathrm{val}}(g,\, N_{\mathrm{eval}}),\; \Phi(g)\bigr)$ \Comment{MSE and param count}
-\EndFor
-\For{$t = 1$ \textbf{to} $G$}
-    \State $\mathcal{R} \leftarrow \mathcal{Q}$ \Comment{offspring pool}
-    \While{$|\mathcal{R}| < 2M$}
-        \State $p_1, p_2 \leftarrow$ tournament select from $\mathcal{Q}$ on (rank, crowding distance)
-        \State $c \leftarrow$ multi-point crossover$(p_1, p_2)$
-        \State $c \leftarrow$ per-gene mutation$(c,\; p_{\mathrm{mut}}=0.10,\; \mathcal{P})$
-        \State Evaluate $(f_1, f_2)$ for $c$; append to $\mathcal{R}$
-    \EndWhile
-    \State $\{\mathcal{F}_0, \mathcal{F}_1, \ldots\} \leftarrow$ non-dominated sort$(\mathcal{R})$
-    \State Assign crowding distance within each front
-    \State $\mathcal{Q} \leftarrow$ select top $M$ from $\mathcal{F}_0, \mathcal{F}_1, \ldots$ (rank then crowding distance)
-\EndFor
-\State \Return $\mathcal{F}_0$ \Comment{final Pareto front}
-\end{algorithmic}
-\end{algorithm}
+NSGA-II \cite{deb2002nsga2} is a fast elitist multi-objective evolutionary algorithm.
+Candidates are ranked by Pareto dominance — genome $a$ dominates $b$ if it is no worse on both objectives and strictly better on at least one — and ties are broken by crowding distance, which favours individuals in sparse regions of objective space.
+At each generation, tournament selection picks parents based on (rank, crowding distance); offspring are produced by multi-point crossover and per-gene mutation at rate $p_{\mathrm{mut}} = 0.10$.
+Elitism guarantees monotone improvement: the next population is drawn from the merged parent-offspring pool sorted by Pareto rank, so the front never degrades.
 
 \subsection{TiDAR: Think-in-Diffusion Autoregressive Prediction}
 

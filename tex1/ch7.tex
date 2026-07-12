@@ -1,9 +1,8 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented \textbf{LIV-TS}, a framework that reformulates multivariate time series architecture design as a multi-objective evolutionary search over Linear Input-Varying (LIV) operators.
-By encoding forecasting architectures as genomes of interchangeable LIV operator classes and running NSGA-II to jointly minimise validation MSE and parameter count, LIV-TS consistently discovers heterogeneous operator mixtures that dominate every homogeneous baseline on the accuracy-compactness Pareto frontier.
-Across all three benchmarks (ETTh1, ETTm1, Exchange-Rate) and both structural templates (S-Mamba, iTransformer), no single-class configuration matches the trade-off achieved by a mixed genome, confirming that operator-family selection is a consequential yet underexplored design dimension.
-We additionally adapt the TiDAR training scheme to continuous-valued time series regression, achieving an 80.8$\times$ wall-clock speedup over full autoregressive decoding with negligible accuracy loss — an improvement that arises directly from training-inference consistency rather than model size reduction.
-Cross-dataset transfer experiments further show that genomes discovered on ETTh1 generalise to ETTh2 and Exchange-Rate without re-running evolution, outperforming the all-Mamba baseline by up to 63.6\%, demonstrating that evolutionary search recovers meaningful structural inductive biases rather than dataset-specific artefacts.
-These results collectively establish that operator choice should be treated as a first-class search variable in time series model design, and that the LIV algebra provides a principled grammar for doing so efficiently.
+We introduced LIV-TS, which turns the operator-family question — which sequence mixing primitive belongs in each architectural slot? — into an explicit multi-objective search problem.
+Representing forecasting models as genomes of interchangeable LIV operators and searching with NSGA-II over accuracy and parameter count simultaneously, we find that no fixed-operator assignment matches the trade-off that heterogeneous search discovers.
+Across two structural templates (S-Mamba and iTransformer) and three benchmarks (ETTh1, ETTm1, Exchange-Rate), mixed genomes consistently land on Pareto-optimal points where homogeneous baselines simply do not appear.
+Two empirical results are particularly worth highlighting: TiDAR draft mode is both faster (80.8$\times$) \emph{and} more accurate than sequential decoding because training and inference stay aligned; and genomes from ETTh1 transfer to ETTh2 and Exchange-Rate with up to 63.6\% improvement over the all-Mamba baseline, suggesting evolutionary search captures temporal inductive biases that generalise beyond the source dataset.
+These findings argue that operator-family selection deserves to be treated as a first-class design variable, and that the LIV algebra offers a clean, searchable grammar for doing so.

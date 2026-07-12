@@ -33,30 +33,73 @@ Figure~\ref{fig:overview} illustrates the overall pipeline.
 %% Arrow a -> b
 \draw[arr] (1.85,0) -- (2.65,0);
 
-%% ---- (b) Genome + Templates ----
+%% ---- (b) Structural Templates ----
 \node[stage=yellow!12] at (4.5,0) {};
-\node[font=\scriptsize\bfseries] at (4.5, 2.0) {(b) Genome \& Templates};
+\node[font=\scriptsize\bfseries] at (4.5, 2.0) {(b) Structural Templates};
 
-\node[font=\tiny\bfseries] at (4.5,  1.35) {S-Mamba ($N{=}4$):};
-\node[gc=green!40]  at (3.78, 0.85) {S};
-\node[gc=blue!40]   at (4.22, 0.85) {L};
-\node[gc=orange!40] at (4.66, 0.85) {T};
-\node[gc=gray!40]   at (5.10, 0.85) {D};
-\draw[dotted, thick, black!50] (4.44, 0.60) -- (4.44, 1.08);
-\node[font=\tiny, text=black!50] at (4.11, 0.57) {Stage 1};
-\node[font=\tiny, text=black!50] at (4.88, 0.57) {Stage 2};
+%% --- S-Mamba (left column, x=3.50) ---
+\node[font=\tiny\bfseries, text=violet!80] at (3.50, 1.72) {S-Mamba};
+%% Input
+\node[draw=black!45, fill=gray!10, rounded corners=1pt,
+      minimum width=1.18cm, minimum height=0.24cm, font=\tiny, inner sep=1pt,align=center]
+  (smIn) at (3.50, 1.42) {In $(B,L,C)$};
+%% Stage 1
+\node[draw=violet!55, fill=violet!8, rounded corners=2pt,
+      minimum width=1.18cm, minimum height=0.68cm] (smS1) at (3.50, 0.72) {};
+\node[font=\tiny\bfseries, text=violet!80] at (3.50, 0.97) {Stage 1 (var.)};
+\node[gc=green!40]  at (3.27, 0.68) {S};
+\node[gc=blue!40]   at (3.73, 0.68) {L};
+%% Stage 2
+\node[draw=orange!55, fill=orange!8, rounded corners=2pt,
+      minimum width=1.18cm, minimum height=0.68cm] (smS2) at (3.50, -0.06) {};
+\node[font=\tiny\bfseries, text=orange!80!black] at (3.50, 0.19) {Stage 2 (tmp.)};
+\node[gc=orange!40] at (3.27,-0.10) {T};
+\node[gc=gray!40]   at (3.73,-0.10) {D};
+%% Output
+\node[draw=black!45, fill=gray!10, rounded corners=1pt,
+      minimum width=1.18cm, minimum height=0.24cm, font=\tiny, inner sep=1pt, align=center]
+  (smOut) at (3.50,-0.82) {Out $(B,H,C)$};
+%% Flow arrows
+\draw[->, thin, black!40] (smIn.south)  -- (smS1.north);
+\draw[->, thin, black!40] (smS1.south)  -- (smS2.north);
+\draw[->, thin, black!40] (smS2.south)  -- (smOut.north);
 
-\node[font=\tiny\bfseries] at (4.5, 0.20) {iTransformer ($N{=}4$):};
-\node[gc=blue!40]   at (3.78, -0.32) {L};
-\node[gc=gray!40]   at (4.22, -0.32) {D};
-\node[gc=orange!40] at (4.66, -0.32) {T};
-\node[gc=gray!40]   at (5.10, -0.32) {D};
-\node[font=\tiny, text=black!50] at (3.78, -0.58) {cv};
-\node[font=\tiny, text=black!50] at (4.22, -0.58) {pv};
-\node[font=\tiny, text=black!50] at (4.66, -0.58) {cv};
-\node[font=\tiny, text=black!50] at (5.10, -0.58) {pv};
+%% Divider between columns
+\draw[black!18, dashed, very thin] (4.50,-1.72) -- (4.50, 1.88);
 
-\node[note] at (4.5, -1.25) {cv\,=\,cross-variate\\pv\,=\,per-variate\\L/S/T/D\,=\,LR/SS/TP/DG};
+%% --- iTransformer (right column, x=5.50) ---
+\node[font=\tiny\bfseries, text=teal!75] at (5.50, 1.72) {iTransformer};
+%% Input
+\node[draw=black!45, fill=gray!10, rounded corners=1pt,
+      minimum width=1.18cm, minimum height=0.24cm, font=\tiny, inner sep=1pt, align=center]
+  (itIn) at (5.50, 1.42) {In $(B,L,C)$};
+%% Block 1
+\node[draw=teal!55, fill=teal!8, rounded corners=2pt,
+      minimum width=1.18cm, minimum height=0.68cm] (itB1) at (5.50, 0.72) {};
+\node[font=\tiny\bfseries, text=teal!75] at (5.50, 0.97) {Block 1};
+\node[gc=blue!40]  at (5.27, 0.74) {L};
+\node[gc=gray!40]  at (5.73, 0.74) {D};
+\node[font=\tiny, text=teal!60] at (5.27, 0.53) {cv};
+\node[font=\tiny, text=teal!60] at (5.73, 0.53) {pv};
+%% Block 2
+\node[draw=teal!55, fill=teal!8, rounded corners=2pt,
+      minimum width=1.18cm, minimum height=0.68cm] (itB2) at (5.50,-0.06) {};
+\node[font=\tiny\bfseries, text=teal!75] at (5.50, 0.19) {Block 2};
+\node[gc=orange!40] at (5.27,-0.04) {T};
+\node[gc=gray!40]   at (5.73,-0.04) {D};
+\node[font=\tiny, text=teal!60] at (5.27,-0.25) {cv};
+\node[font=\tiny, text=teal!60] at (5.73,-0.25) {pv};
+%% Output
+\node[draw=black!45, fill=gray!10, rounded corners=1pt,
+      minimum width=1.18cm, minimum height=0.24cm, font=\tiny, inner sep=1pt, align=center]
+  (itOut) at (5.50,-0.82) {Out $(B,H,C)$};
+%% Flow arrows
+\draw[->, thin, black!40] (itIn.south)  -- (itB1.north);
+\draw[->, thin, black!40] (itB1.south)  -- (itB2.north);
+\draw[->, thin, black!40] (itB2.south)  -- (itOut.north);
+
+%% Legend
+\node[note] at (4.5,-1.40) {cv\,=\,cross-variate\\pv\,=\,per-variate\\S/L/T/D\,=\,SS/LR/TP/DG};
 
 %% Arrow b -> c
 \draw[arr] (6.35,0) -- (7.15,0);
@@ -113,8 +156,8 @@ Figure~\ref{fig:overview} illustrates the overall pipeline.
 \end{tikzpicture}%
 }
 \caption{Overview of the LIV-TS pipeline.
-  \textbf{(a)} Operator pool: 8 base LIV classes spanning four token-mixing families (LOW\_RANK, SEMI\_SEPARABLE, TOEPLITZ, DIAGONAL), plus differential variants.
-  \textbf{(b)} Genome encoding: each architecture is a fixed-length integer vector assigning one operator class per slot inside either the S-Mamba (Stage\,1/Stage\,2) or iTransformer (alternating cross-variate/per-variate) structural template.
+  \textbf{(a)} Operator pool: 8 base LIV classes spanning four token-mixing families, plus differential variants.
+  \textbf{(b)} Structural templates: S-Mamba splits the genome into a Stage~1 variate-mixing backbone and a Stage~2 temporal-refinement backbone; iTransformer interleaves cross-variate (cv) and per-variate (pv) sub-layers within each block. Colored cells are searchable LIV operator slots.
   \textbf{(c)} NSGA-II evolves the population over 18 generations; each candidate is evaluated for 500 steps and placed on the Pareto front of MSE ($f_1$) versus parameter count ($f_2$).
   \textbf{(d)} Top Pareto-front genomes are retrained for 20{,}000 steps and applied directly to transfer datasets without re-running evolution.}
 \label{fig:overview}
@@ -123,81 +166,12 @@ Figure~\ref{fig:overview} illustrates the overall pipeline.
 \subsection{LIV-TS Operator Pool}
 \label{sec:pool}
 
-We select eleven base operator classes spanning all four LIV token-mixing families.
-Each class pairs a featurizer (how $B$, $C$, $V$ are computed from $x$) with a token-mix type (the structure of $M_{ij}$) and a channel-mix type (the structure of $W$).
-Table~\ref{tab:operator_pool} lists the full pool.
-
-\subsubsection{Attention Family (LOW\_RANK)}
-
-All attention variants use $T = CB^\top/\sqrt{d}$ with softmax normalisation.
-They differ in how the key ($B$), query ($C$), and value ($V$) projections are computed, trading parameter count against expressiveness.
-
-\textbf{SA-1: Standard Multi-Head Attention.}
-All heads use independent key, query, and value projections over the full dimension $d$.
-Channel mixing is GROUPED (one projection per head).
-
-\textbf{SA-2: Convolution-Pre MHA.}
-A causal depthwise Conv1d (kernel size 3) is applied to $x$ before all projections, injecting local context into each attention head without additional parameters.
-
-\textbf{SA-3: Multi-Query Attention \cite{shazeer2019mqattn}.}
-A single shared key-value head is broadcast to all $h$ query heads, reducing KV parameter count to $1/h$ of MHA at the cost of representational capacity.
-
-\textbf{SA-4: Grouped-Query Attention \cite{ainslie2023gqa}.}
-$h/2$ KV head groups, each serving two query heads.
-This interpolates between MHA (full expressiveness) and MQA (maximal compression).
-
-\subsubsection{Recurrence Family (SEMI\_SEPARABLE)}
-
-We use a single SEMI\_SEPARABLE operator: \textbf{Rec-4 (CfC)}, the Closed-form Continuous-time network \cite{hasani2021cfc}.
-SSM variants such as Mamba \cite{gu2023mamba} and S4 \cite{gu2021s4} also map to SEMI\_SEPARABLE and are included in the pool as ablation baselines (Section~\ref{sec:exp_ablation}), but CfC is the sole recurrence operator carried through to the main search and transfer experiments.
-
-\textbf{Rec-4: CfC.}
-The featurizer computes complementary forget and input gates from each token:
-\begin{equation}
-  g_t = \sigma(W_g\,x_t + b_g), \quad
-  \mathbf{b}_t = (1 - g_t) \odot W_{\mathrm{in}}\,x_t, \quad
-  \mathbf{a}_t = g_t,
-  \label{eq:cfc_feat}
-\end{equation}
-with internal expansion $16\times$ and DIAGONAL channel mixing.
-The constraint $g_t + (1-g_t)=1$ is satisfied by construction; no additional learnable bias $a_{\log}$ is required.
-As shown in Section~\ref{sec:cfc_liv}, substituting Eq.~\eqref{eq:cfc_feat} into the SEMI\_SEPARABLE $T_{ij}$ formula recovers precisely the unrolled CfC recurrence.
-
-\subsubsection{Convolution Family (TOEPLITZ)}
-
-Both convolution variants use $T_{ij} = C_i K_{i-j} B_j$ with sigmoid gates for $B$ and $C$.
-Channel mixing is DIAGONAL.
-The value projection is the raw input ($V = x$), keeping parameter count low.
-
-\textbf{GConv-1: Short Gated Convolution.}
-The kernel $K \in \mathbb{R}^{d \times 3}$ is a fixed learned parameter shared across all inputs.
-The 3-tap window captures immediate neighbourhood structure at minimal cost.
-
-\textbf{GConv-2: Long Input-Dependent Convolution.}
-Following the Hyena implicit-kernel approach \cite{poli2023hyena}, a two-layer MLP generates a 64-tap kernel from the global average of the input:
-\begin{equation}
-  K = \mathrm{MLP}(\mathrm{mean}(x)) \in \mathbb{R}^{d \times 64}.
-\end{equation}
-The kernel depends on the current sequence, providing global context awareness at $\mathcal{O}(Ld)$ cost.
-
-\subsubsection{Memoryless Family (DIAGONAL)}
-
-\textbf{GMemless: SwiGLU FFN.}
-Element-wise gating with $4\times$ internal expansion:
-\begin{equation}
-  \mathrm{out}_i = \mathrm{SiLU}(W_{\mathrm{gate}} x_i) \odot (W_{\mathrm{val}} x_i).
-\end{equation}
-Channel mixing is DENSE (full output projection).
-No cross-token interaction; each position is processed independently.
-
-\subsubsection{Differential Variants}
-
-Every base class $c \in [1,9]$ has a \emph{differential} counterpart $c + 9 \in [10, 18]$, making a pool of 18 operator classes in total (plus Rec-3 and Rec-4 differentials at classes 19--21 for the extended pool).
-A differential operator instantiates \emph{two} independent featurizers with the same class and computes their difference before channel mixing:
-\begin{equation}
-  \mathrm{mixed}^{\mathrm{diff}}_i = \mathrm{LIV}_1(x)_i - \mathrm{LIV}_2(x)_i.
-\end{equation}
-This doubles expressiveness at approximately $2\times$ the parameter cost and can be interpreted as a learned contrast between two distinct views of the input.
+We select nine base operator classes spanning all four LIV token-mixing families; Table~\ref{tab:operator_pool} lists the full pool.
+The attention variants (SA-1 through SA-4) use $T = CB^\top/\sqrt{d}$ with softmax and differ in key-value sharing: SA-1 is standard MHA, SA-2 adds a depthwise Conv1d pre-projection, SA-3 (MQA \cite{shazeer2019mqattn}) shares one KV head across all queries, and SA-4 (GQA \cite{ainslie2023gqa}) groups KV heads in pairs, interpolating between MHA and MQA.
+The recurrence operators Rec-4 (CfC, $16{\times}$ expansion) and Rec-5 (Compact CfC, $2{\times}$ expansion) implement the complementary-gated SEMI\_SEPARABLE pattern from Section~\ref{sec:cfc_liv}.
+GConv-1 uses a fixed 3-tap learned kernel; GConv-2 generates a 64-tap input-dependent kernel via a small MLP \cite{poli2023hyena}, providing long-range context at $\mathcal{O}(Ld)$ cost.
+GMemless is a SwiGLU FFN \cite{shazeer2020glu} with $4{\times}$ internal expansion and no cross-token interaction.
+Every base class has a \emph{differential} counterpart (IDs 10--18) that subtracts two independent instances of the same class, approximately doubling expressiveness at $2{\times}$ parameter cost.
 
 \begin{table}[t]
 \caption{LIV-TS operator pool. Expansion: ratio of internal to model dimension $d$. Token-mix abbreviations: LR = Low-Rank, SS = Semi-Sep., TP = Toeplitz, DG = Diagonal.}
@@ -217,156 +191,30 @@ ID & Name & Token Mix & Ch.\ Mix & Exp. \\
 6  & GConv-1         & TP & Diagonal & $1\times$ \\
 7  & GConv-2         & TP & Diagonal & $1\times$ \\
 8  & GMemless (FFN)  & DG & Dense    & $4\times$ \\
+9  & Rec-5 (Compact CfC) & SS & Diagonal & $2\times$ \\
 \bottomrule
-\multicolumn{5}{l}{Classes 9--16: differential variants (LIV$_1(x)-$LIV$_2(x)$).}
+\multicolumn{5}{l}{Classes 10--18: differential variants (LIV$_1(x)-$LIV$_2(x)$) of classes 1--9.}
 \end{tabular}
 \end{table}
 
-\subsection{Genome Encoding}
+\subsection{Genome Encoding and Structural Templates}
 \label{sec:genome}
 
-A genome $g$ is a fixed-length list of integer operator class IDs, one per \emph{slot} in the model.
-Each slot corresponds to one LIV block sub-layer.
-With $N$ total blocks the genome length is $N$ for iTransformer and $N$ for S-Mamba (both structures have one active LIV class per block, but the slot \emph{role} differs by structure as described below).
+A genome $g$ is a fixed-length list of integer operator class IDs, one per slot in the model.
+The channel-mix type is derived deterministically from the token-mix family of the selected class (Table~\ref{tab:operator_pool}), reducing the search space to $|\mathcal{P}|^N$.
 
-The channel-mix type is not searched independently: it is derived deterministically from the token-mix family of the selected class, following the pairing in Table~\ref{tab:operator_pool}.
-This reduces the search space from $|\text{pool}|^N \times 3^N$ to $|\text{pool}|^N$.
-
-\subsection{Structural Instantiation}
-\label{sec:structures}
-
-\subsubsection{S-Mamba Instantiation}
-
-The S-Mamba structure embeds each variate's $L$-step history as a $D$-dimensional token and processes $C$ variate tokens through two sequential backbones:
-\begin{equation}
-  (B,L,C) \to (B,C,L) \xrightarrow{\mathrm{Linear}(L \to D)} (B,C,D).
-\end{equation}
-
-The genome of length $N$ is split in half.
-\textbf{Layers $0 \ldots N/2-1$} drive the \emph{variate backbone} (Stage 1): each LIV block mixes information across the $C$ variate tokens bidirectionally, building correlated representations.
-\textbf{Layers $N/2 \ldots N-1$} drive the \emph{temporal backbone} (Stage 2): each LIV block refines temporal structure within the $D$-dimensional variate embeddings.
-A linear head $D \to H$ per variate produces the forecast, transposed to $(B,H,C)$.
-
-The original S-Mamba \cite{wang2024smamba} is recovered by setting all Stage-1 slots to Rec-1 (Mamba) and all Stage-2 slots to GMemless (FFN).
-
-\subsubsection{iTransformer Instantiation}
-
-The iTransformer structure uses a single backbone of $N$ stacked blocks.
-Each block contains two sub-layers that alternate roles: the \emph{cross-variate} sub-layer mixes information across the $C$ variate tokens, and the \emph{per-variate} sub-layer acts independently on each variate's $D$-dimensional representation.
-
-Within a block of index $b$, genome entry $2b$ specifies the cross-variate operator and entry $2b+1$ specifies the per-variate operator (for a total genome length $2N$).
-The original iTransformer \cite{liu2024itransformer} is recovered by setting all cross-variate slots to SA-1 and all per-variate slots to GMemless.
-
-Both structures share the same input/output interface $(B,L,C) \to (B,H,C)$ and use Reversible Instance Normalisation (RevIN \cite{kim2022revin}) to remove per-variate distribution shift before the backbone and restore it after.
-Figure~\ref{fig:structures} contrasts the two structural templates.
-
-\begin{figure}[t]
-\centering
-\resizebox{0.97\columnwidth}{!}{%
-\begin{tikzpicture}[
-  font=\small, >=Stealth,
-  io/.style={draw=black!55, rounded corners=3pt, fill=gray!10,
-             minimum width=2.5cm, minimum height=0.44cm,
-             align=center, font=\scriptsize},
-  stg/.style={draw=#1!65, rounded corners=4pt, fill=#1!10,
-              minimum width=2.5cm, minimum height=1.05cm},
-  cell/.style={draw=#1!75, fill=#1!35, rounded corners=2pt,
-               minimum width=0.50cm, minimum height=0.40cm,
-               font=\tiny\bfseries, inner sep=1pt, align=center},
-  arr/.style={->, draw=black!50, thin},
-  lbl/.style={font=\tiny, text=black!55},
-]
-
-%% ========= (a) S-MAMBA  (centred x=1.75) =========
-\node[font=\small\bfseries] at (1.75, 4.28) {(a) S-Mamba};
-\node[lbl, align=center]    at (1.75, 4.02) {$N{=}4$; split $2{+}2$};
-
-\node[io] (smIN) at (1.75, 3.66) {Input $(B,L,C)$};
-
-\node[stg=violet] (smS1) at (1.75, 2.68) {};
-\node[font=\tiny\bfseries, text=violet!85] at (1.75, 3.12) {Stage 1 — Variate Mix};
-\node[lbl, text=violet!65]                 at (1.75, 2.90) {mix across $C$ variates};
-\node[cell=green] at (1.22, 2.66) {S};
-\node[cell=blue]  at (2.28, 2.66) {L};
-\draw[arr] (smIN.south) -- node[lbl, right, pos=0.55] {embed $L{\to}D$} (smS1.north);
-
-\node[stg=orange] (smS2) at (1.75, 1.46) {};
-\node[font=\tiny\bfseries, text=orange!80!black] at (1.75, 1.90) {Stage 2 — Temporal};
-\node[lbl, text=orange!70!black]                 at (1.75, 1.68) {refine $D$-dim per variate};
-\node[cell=orange] at (1.22, 1.44) {T};
-\node[cell=gray]   at (2.28, 1.44) {D};
-\draw[arr] (smS1.south) -- (smS2.north);
-
-\node[io] (smOUT) at (1.75, 0.28) {Output $(B,H,C)$};
-\draw[arr] (smS2.south) -- node[lbl, right, pos=0.55] {head $D{\to}H$} (smOUT.north);
-
-%% ========= (b) ITRANSFORMER  (centred x=5.55) =========
-\node[font=\small\bfseries] at (5.55, 4.28) {(b) iTransformer};
-\node[lbl, align=center]    at (5.55, 4.02) {$N{=}4$; interleaved cv/pv};
-
-\node[io] (itIN) at (5.55, 3.66) {Input $(B,L,C)$};
-
-\node[stg=teal] (itB1) at (5.55, 2.68) {};
-\node[font=\tiny\bfseries, text=teal!80] at (5.55, 3.12) {Block 1};
-\draw[teal!30, dashed, ultra thin] (4.28, 2.68) -- (6.82, 2.68);
-\node[cell=blue] at (4.60, 2.92) {L};
-\node[lbl, anchor=west, text=teal!75] at (4.98, 2.92) {cv (cross-variate)};
-\node[cell=gray] at (4.60, 2.44) {D};
-\node[lbl, anchor=west, text=teal!75] at (4.98, 2.44) {pv (per-variate)};
-\draw[arr] (itIN.south) -- node[lbl, right, pos=0.55] {embed $L{\to}D$} (itB1.north);
-
-\node[stg=teal] (itB2) at (5.55, 1.46) {};
-\node[font=\tiny\bfseries, text=teal!80] at (5.55, 1.90) {Block 2};
-\draw[teal!30, dashed, ultra thin] (4.28, 1.46) -- (6.82, 1.46);
-\node[cell=orange] at (4.60, 1.70) {T};
-\node[lbl, anchor=west, text=teal!75] at (4.98, 1.70) {cv (cross-variate)};
-\node[cell=gray]   at (4.60, 1.22) {D};
-\node[lbl, anchor=west, text=teal!75] at (4.98, 1.22) {pv (per-variate)};
-\draw[arr] (itB1.south) -- (itB2.north);
-
-\node[io] (itOUT) at (5.55, 0.28) {Output $(B,H,C)$};
-\draw[arr] (itB2.south) -- node[lbl, right, pos=0.55] {head $D{\to}H$} (itOUT.north);
-
-%% ========= DIVIDER + LEGEND =========
-\draw[black!20, dashed, thin] (3.65, 0.06) -- (3.65, 4.45);
-
-\node[cell=green]  at (0.56, -0.28) {}; \node[lbl] at (1.12, -0.28) {SEMI\_SEP};
-\node[cell=blue]   at (1.92, -0.28) {}; \node[lbl] at (2.48, -0.28) {LOW\_RANK};
-\node[cell=orange] at (3.28, -0.28) {}; \node[lbl] at (3.84, -0.28) {TOEPLITZ};
-\node[cell=gray]   at (4.60, -0.28) {}; \node[lbl] at (5.16, -0.28) {DIAGONAL};
-
-\end{tikzpicture}%
-}
-\caption{Structural templates used in LIV-TS.
-  \textbf{(a) S-Mamba}: genome split into Stage~1 (variate mixing across $C$ tokens, bidirectional) and Stage~2 (temporal refinement within each $D$-dim variate embedding) — roles are \emph{sequential}.
-  \textbf{(b) iTransformer}: each block \emph{interleaves} a cross-variate (cv) and a per-variate (pv) sub-layer; genome entries $g_{2b}$ and $g_{2b+1}$ set the operators for block $b$.
-  Cell colours indicate operator family (example genomes from Figure~\ref{fig:overview}).
-  Both structures share the $(B,L,C)\!\to\!(B,H,C)$ interface with RevIN normalisation.}
-\label{fig:structures}
-\end{figure}
+For \textbf{S-Mamba}, the genome splits evenly between a Stage~1 variate-mixing backbone (operators mix across $C$ variate tokens bidirectionally) and a Stage~2 temporal-refinement backbone (operators act within each $D$-dimensional variate embedding).
+For \textbf{iTransformer}, each block interleaves a cross-variate (cv) and a per-variate (pv) sub-layer; genome entries $g_{2b}$ and $g_{2b+1}$ set the operators for block $b$.
+Both structures share the $(B,L,C)\!\to\!(B,H,C)$ interface with RevIN \cite{kim2022revin} normalisation; Figure~\ref{fig:overview} panel~(b) illustrates the two template flows.
 
 \subsection{TiDAR-TS Adaptation}
 \label{sec:tidar_adapt}
 
-We adapt TiDAR \cite{tidar2024} to continuous-valued regression.
-The original TiDAR targets discrete language tokens with cross-entropy loss.
-Our adaptation makes three changes:
-
-\textbf{(1) MSE regression loss.}
-Both the AR and draft objectives use mean squared error on un-normalised (RevIN-restored) outputs:
-\begin{equation}
-  \mathcal{L}_{\mathrm{AR}}   = \mathrm{MSE}(\hat{x}_{2:L},\, x_{2:L}), \quad
-  \mathcal{L}_{\mathrm{Diff}} = \mathrm{MSE}(\hat{y}_{1:H},\, y_{1:H}).
-\end{equation}
-
-\textbf{(2) Deterministic draft.}
-The draft head directly predicts the forecast mean; there is no stochastic denoising or sampling step.
-Draft outputs are used as-is or overwritten by autoregressive refinement for the first $k$ positions.
-
-\textbf{(3) $\alpha$ as a training hyperparameter.}
-The balance coefficient $\alpha$ in Eq.~\eqref{eq:tidar_loss} controls how strongly the AR auxiliary task regularises the backbone.
-We treat $\alpha$ as a tunable hyperparameter and ablate values $\alpha \in \{0, 0.1, 0.5, 1.0, 2.0, 5.0\}$ in Section~\ref{sec:exp_alpha}.
-$\alpha = 0$ recovers pure parallel prediction; $\alpha \to \infty$ recovers a standard AR model with an auxiliary draft head.
+We adapt TiDAR \cite{tidar2024} to continuous-valued regression with three changes.
+\textbf{(1) MSE loss.} Both the AR and draft objectives use mean squared error on RevIN-restored outputs:
+$\mathcal{L}_{\mathrm{AR}} = \mathrm{MSE}(\hat{x}_{2:L}, x_{2:L})$ and $\mathcal{L}_{\mathrm{Diff}} = \mathrm{MSE}(\hat{y}_{1:H}, y_{1:H})$.
+\textbf{(2) Deterministic draft.} The draft head predicts the forecast mean directly; no stochastic denoising step is needed.
+\textbf{(3) Fixed $\alpha$.} We set $\alpha = 1.0$ in Eq.~\eqref{eq:tidar_loss} for all experiments, providing moderate AR regularisation without dominating the parallel objective.
 Figure~\ref{fig:tidar} illustrates the training setup and the three inference modes.
 
 \begin{figure}[t]
@@ -485,62 +333,16 @@ Figure~\ref{fig:tidar} illustrates the training setup and the three inference mo
 \end{tikzpicture}%
 }
 \caption{TiDAR-TS overview.
-  \textbf{(a) Training}: the $L{+}H$ token sequence is processed by the backbone under a hybrid sparsity mask---lookback tokens attend causally among themselves while horizon tokens attend bidirectionally to the entire lookback.
-  An AR head computes $\mathcal{L}_{\mathrm{AR}}$ (next-step prediction on lookback) and a Draft head computes $\mathcal{L}_{\mathrm{Diff}}$ (parallel prediction of all $H$ horizon steps).
-  \textbf{(b) Inference modes}: \emph{Draft} ($\mathcal{O}(1)$) predicts all $H$ steps in one forward pass; \emph{Partial-AR} ($\mathcal{O}(k)$) refines the first $k$ steps autoregressively and fills the rest with the draft; \emph{Full-AR} ($\mathcal{O}(H)$) applies $H$ sequential passes for maximum accuracy.}
+  \textbf{(a) Training}: the backbone processes $L{+}H$ tokens under a hybrid mask; an AR head predicts $\mathcal{L}_{\mathrm{AR}}$ on the lookback and a Draft head predicts $\mathcal{L}_{\mathrm{Diff}}$ on all $H$ horizon steps in parallel.
+  \textbf{(b) Inference modes}: \emph{Draft} ($\mathcal{O}(1)$) predicts all $H$ steps in one pass; \emph{Partial-AR} ($\mathcal{O}(k)$) refines the first $k$ steps; \emph{Full-AR} ($\mathcal{O}(H)$) applies $H$ sequential passes.}
 \label{fig:tidar}
 \end{figure}
 
 \subsection{NSGA-II Search Protocol}
 \label{sec:search}
 
-\subsubsection{Objectives}
-
-We define two minimisation objectives for each genome $g$:
-\begin{align}
-  f_1(g) &= \mathcal{L}_{\mathrm{val}}(g) \quad \text{(validation MSE after $N_{\mathrm{eval}}$ steps)}, \\
-  f_2(g) &= \Phi(g) \quad \text{(total parameter count)}.
-\end{align}
+We minimise two objectives jointly: validation MSE $f_1(g) = \mathcal{L}_{\mathrm{val}}(g)$ after $N_{\mathrm{eval}}$ training steps, and total parameter count $f_2(g) = \Phi(g)$.
 No weighting is applied; NSGA-II tracks the Pareto front of accuracy versus compactness automatically.
-
-\subsubsection{Search Configuration}
-
-Table~\ref{tab:nsga_config} lists the NSGA-II hyperparameters used in all experiments.
-
-\begin{table}[t]
-\caption{NSGA-II search configuration.}
-\label{tab:nsga_config}
-\centering
-\begin{tabular}{lc}
-\toprule
-Hyperparameter & Value \\
-\midrule
-Population size           & 16 \\
-Generations               & 18 \\
-Evaluation steps / genome & 500 \\
-Mutation probability      & 0.10 \\
-Elitism (carry-over)      & 2 \\
-Crossover points          & multi-point on layer list \\
-Post-search full training & 20{,}000 steps (top-$K$ Pareto front) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Each candidate genome is trained with the Adam optimiser for $N_{\mathrm{eval}} = 500$ steps on a single dataset/horizon pair; validation MSE and parameter count are recorded.
-After all 18 generations, the top-$K$ Pareto-front genomes (ranked by validation MSE) are retrained from scratch for 20{,}000 steps to obtain their final test performance.
-
-\subsubsection{Mutation and Crossover}
-
-Mutation replaces each genome entry independently with a uniformly sampled class ID from the operator pool with probability $p_{\mathrm{mut}} = 0.10$.
-Multi-point crossover selects two random cut points in the genome list and exchanges the segment between them between two parent genomes.
-A \texttt{repair} step clamps any out-of-range class IDs to the valid pool after mutation.
-
-\subsection{Overall Pipeline}
-
-The complete LIV-TS workflow proceeds in three phases:
-
-\begin{enumerate}
-  \item \textbf{Search.} Run NSGA-II for 18 generations on the target dataset (ETTh1, H\,=\,96) using $N_{\mathrm{eval}}=500$ steps per genome. Record the final Pareto front.
-  \item \textbf{Full training.} Retrain the top Pareto-front genomes for 20{,}000 steps. Report test MSE and MAE.
-  \item \textbf{Transfer.} Apply the best genome (by validation MSE) directly to new datasets and horizons without re-running evolution, to assess architectural generalisability.
-\end{enumerate}
+We run 18 generations with population size 16; each candidate genome is evaluated for 500 Adam steps ($\mathrm{lr}=10^{-3}$) and its objectives recorded.
+Offspring are produced by multi-point crossover and per-gene mutation ($p_{\mathrm{mut}}=0.10$); 2 elite individuals carry over unchanged each generation.
+After search, the top-$K$ Pareto-front genomes (ranked by validation MSE) are retrained from scratch for 20{,}000 steps to obtain final test performance.
